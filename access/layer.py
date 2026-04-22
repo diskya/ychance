@@ -1,4 +1,4 @@
-"""Access layer — the sole read path into the raw store.
+"""Access layer — the sole public read path into the raw store.
 
 Implements methodology §6.2 "Representation for Propose". Every read of the
 raw store passes through ``AccessLayer``, which:
@@ -11,7 +11,8 @@ raw store passes through ``AccessLayer``, which:
    — admitted, denied for peek, or denied by rate limit.
 
 The raw store refuses reads from any caller that is not an
-``AuthorizedReader``; ``AccessLayer`` is the only production subclass.
+``AuthorizedReader``. ``AccessLayer`` owns a private reader capability and
+does not expose that reader on its public API surface.
 """
 
 from __future__ import annotations
@@ -39,7 +40,11 @@ def _ensure_utc(ts: datetime) -> datetime:
     return ts.astimezone(timezone.utc)
 
 
-class AccessLayer(AuthorizedReader):
+class _AccessReader(AuthorizedReader):
+    """Internal raw-store capability owned by one AccessLayer instance."""
+
+
+class AccessLayer:
     """Thin wrapper over ``RawStore`` enforcing temporal admissibility,
     per-cycle read rate limit, and audit logging.
 
@@ -63,8 +68,9 @@ class AccessLayer(AuthorizedReader):
             raise ValueError("cycle_id must be a non-empty string")
         if not isinstance(max_reads_per_cycle, int) or max_reads_per_cycle < 0:
             raise ValueError("max_reads_per_cycle must be a non-negative int")
-        self._store = store
-        self._audit = audit
+        self.__store = store
+        self.__audit = audit
+        self.__reader = _AccessReader()
         self._cycle_id = cycle_id
         self._max_reads = max_reads_per_cycle
         self._count = 0
@@ -105,7 +111,7 @@ class AccessLayer(AuthorizedReader):
         """
         qt = _ensure_utc(query_time)
         self._enforce_budget(hash=hash, qt=qt, kind="bytes")
-        provs = self._store.provenance(hash, reader=self)
+        provs = self.__store.provenance(hash, reader=self.__reader)
         if not provs:
             self._log_read(hash, qt, kind="bytes", outcome="unknown")
             raise KeyError(hash)
@@ -122,7 +128,7 @@ class AccessLayer(AuthorizedReader):
                 f"hash {hash}: earliest vendor_timestamp "
                 f"{earliest.isoformat()} > query_time {qt.isoformat()}"
             )
-        data = self._store.get(hash, reader=self)
+        data = self.__store.get(hash, reader=self.__reader)
         self._count += 1
         self._log_read(
             hash,
@@ -143,7 +149,7 @@ class AccessLayer(AuthorizedReader):
         """
         qt = _ensure_utc(query_time)
         self._enforce_budget(hash=hash, qt=qt, kind="provenance")
-        triples = self._store.provenance(hash, reader=self)
+        triples = self.__store.provenance(hash, reader=self.__reader)
         visible = [p for p in triples if p.vendor_timestamp <= qt]
         self._count += 1
         self._log_read(
@@ -160,11 +166,11 @@ class AccessLayer(AuthorizedReader):
         """Return correction-hashes whose own earliest vendor_timestamp ≤ ``query_time``."""
         qt = _ensure_utc(query_time)
         self._enforce_budget(hash=hash, qt=qt, kind="corrections")
-        all_links = self._store.corrections(hash, reader=self)
+        all_links = self.__store.corrections(hash, reader=self.__reader)
         visible: list[str] = []
         suppressed = 0
         for ch in all_links:
-            c_provs = self._store.provenance(ch, reader=self)
+            c_provs = self.__store.provenance(ch, reader=self.__reader)
             if c_provs and min(p.vendor_timestamp for p in c_provs) <= qt:
                 visible.append(ch)
             else:
@@ -211,4 +217,4 @@ class AccessLayer(AuthorizedReader):
             "reads_max": self._max_reads,
         }
         record.update(extra)
-        self._audit.append(record)
+        self.__audit.append(record)

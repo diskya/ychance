@@ -29,8 +29,9 @@ class AuthorizedReader:
     Methodology §6.2 ("Representation for Propose") requires every read of the
     raw store to pass through the access layer (temporal admissibility, rate
     limit, audit). ``RawStore`` enforces this by refusing any reader that does
-    not subclass ``AuthorizedReader``. In application code only
-    ``access.AccessLayer`` subclasses it.
+    not subclass ``AuthorizedReader``. In application code the access layer
+    owns a private ``AuthorizedReader`` capability; callers are not supposed to
+    hold raw-store reader objects directly.
     """
 
     __slots__ = ()

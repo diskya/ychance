@@ -14,14 +14,14 @@ A Stage is a typed, versioned node with:
 1. Hashes the inputs and combines the hash with ``(name, version)`` to
    form a fingerprint.
 2. On fingerprint hit (prior run's artifact still present): returns the
-   cached output **with no side effects** - no artifact write, no audit
+   cached output **with no side effects** — no artifact write, no audit
    record. This is load-bearing for the 1.4 exit criterion
    ("re-running an unchanged DAG produces zero new audit records
    except re-run-start/end markers"). Only the DAG emits the markers.
 3. On miss: runs ``compute`` under a :class:`StageContext` that enforces
    the cost ceiling, verifies the invariant, writes the output to the
    artifact store, records the fingerprint, and emits exactly one Stage
-   audit record describing the call (not individual reads - those are
+   audit record describing the call (not individual reads — those are
    emitted by :class:`access.AccessLayer`).
 """
 
@@ -30,8 +30,9 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
+import types
 from dataclasses import dataclass, field
-from typing import Any, ClassVar, Optional
+from typing import Any, ClassVar, Optional, Union, get_args, get_origin, get_type_hints
 
 from access import AccessLayer
 from audit import AuditLog, canonicalize
@@ -42,6 +43,25 @@ from .cost import CostCeiling, CostCeilingExceeded, CostUsage
 
 class InvariantViolation(RuntimeError):
     """Raised when a Stage's output fails its declared invariant."""
+
+
+_ARCHITECTURE_STAGES = frozenset(
+    {
+        "Ingest",
+        "Represent",
+        "Propose",
+        "Screen",
+        "Validate",
+        "Council",
+        "Paper-deploy",
+        "Observe",
+        "Graduate",
+        "Execute",
+        "Retire",
+        "Audit",
+        "Review",
+    }
+)
 
 
 def _to_jsonable(obj: Any) -> Any:
@@ -59,12 +79,57 @@ def _content_hash(obj: Any) -> str:
     return hashlib.sha256(canonicalize(_to_jsonable(obj))).hexdigest()
 
 
+def _from_jsonable(type_hint: Any, obj: Any) -> Any:
+    if type_hint in (Any, object) or type_hint is None:
+        return obj
+
+    origin = get_origin(type_hint)
+    if dataclasses.is_dataclass(type_hint) and isinstance(obj, dict):
+        hints = get_type_hints(type_hint)
+        kwargs = {
+            field.name: _from_jsonable(hints.get(field.name, field.type), obj[field.name])
+            for field in dataclasses.fields(type_hint)
+            if field.name in obj
+        }
+        return type_hint(**kwargs)
+
+    if origin is list and isinstance(obj, list):
+        (item_type,) = get_args(type_hint) or (Any,)
+        return [_from_jsonable(item_type, item) for item in obj]
+
+    if origin is tuple and isinstance(obj, list):
+        args = get_args(type_hint)
+        if len(args) == 2 and args[1] is Ellipsis:
+            return tuple(_from_jsonable(args[0], item) for item in obj)
+        return tuple(_from_jsonable(arg, item) for arg, item in zip(args, obj))
+
+    if origin is dict and isinstance(obj, dict):
+        key_type, value_type = get_args(type_hint) or (Any, Any)
+        return {
+            _from_jsonable(key_type, key): _from_jsonable(value_type, value)
+            for key, value in obj.items()
+        }
+
+    if origin in (Union, types.UnionType):
+        options = [arg for arg in get_args(type_hint) if arg is not type(None)]
+        if obj is None:
+            return None
+        for option in options:
+            try:
+                return _from_jsonable(option, obj)
+            except (TypeError, ValueError):
+                continue
+        return obj
+
+    return obj
+
+
 @dataclass
 class StageContext:
     """Per-invocation handle threaded into :meth:`Stage.compute`.
 
     Tracks cost against the stage's ceiling and, when the stage needs raw
-    bytes, exposes the :class:`AccessLayer` (never a bare ``RawStore`` -
+    bytes, exposes the :class:`AccessLayer` (never a bare ``RawStore`` —
     methodology §6.2 requires every read to pass through the access
     layer, where admissibility, rate limiting, and per-read audit live).
     """
@@ -116,12 +181,12 @@ class Stage:
             or return False on failure)
 
     Subclasses MAY override:
-        audit_category    - defaults to "Stage"; set to a §6.9 record
-                            category (e.g. "Ingest", "Represent") when the
-                            subclass wants its audit records tagged that way.
+        audit_stage       — one of the architecture stages from §6.1.
+        audit_category    — defaults to ``audit_stage``; override when a stage
+                            needs a narrower §6.9 category name.
         _serialize_output / _deserialize_output
-                          - for output types that dataclasses.asdict does not
-                            round-trip cleanly (nested dataclasses, bytes, ...).
+                          — for output types that canonical JSON does not
+                            round-trip cleanly (bytes, custom classes, …).
     """
 
     name: ClassVar[str] = ""
@@ -129,7 +194,8 @@ class Stage:
     cost_ceiling: ClassVar[CostCeiling] = CostCeiling()
     InputType: ClassVar[type] = type(None)
     OutputType: ClassVar[type] = type(None)
-    audit_category: ClassVar[str] = "Stage"
+    audit_stage: ClassVar[str] = ""
+    audit_category: ClassVar[Optional[str]] = None
 
     def __init__(
         self,
@@ -156,6 +222,17 @@ class Stage:
             raise TypeError(
                 f"{type(self).__name__}: 'cost_ceiling' must be a CostCeiling"
             )
+        if self.audit_stage not in _ARCHITECTURE_STAGES:
+            raise ValueError(
+                f"{type(self).__name__}: 'audit_stage' must be one of "
+                f"{sorted(_ARCHITECTURE_STAGES)}"
+            )
+        if self.audit_category is not None and (
+            not isinstance(self.audit_category, str) or not self.audit_category
+        ):
+            raise ValueError(
+                f"{type(self).__name__}: 'audit_category' must be a non-empty str or None"
+            )
         self._artifacts = artifacts
         self._audit = audit
         self._access = access
@@ -172,7 +249,7 @@ class Stage:
 
         Raise :class:`InvariantViolation` or return falsy on failure.
         :class:`PipelineDAG` refuses to add a stage that has not overridden
-        this method - methodology §6.1 requires every stage to declare an
+        this method — methodology §6.1 requires every stage to declare an
         invariant.
         """
         raise NotImplementedError(
@@ -184,8 +261,8 @@ class Stage:
 
     def _deserialize_output(self, data: bytes) -> Any:
         obj = json.loads(data.decode("utf-8"))
-        if dataclasses.is_dataclass(self.OutputType) and isinstance(obj, dict):
-            return self.OutputType(**obj)
+        if dataclasses.is_dataclass(self.OutputType):
+            return _from_jsonable(self.OutputType, obj)
         return obj
 
     # --- main entry point -------------------------------------------------
@@ -219,12 +296,16 @@ class Stage:
         inputs_hash, fp = self.fingerprint(inputs)
 
         cached = self._artifacts.lookup_fingerprint(fp)
-        if cached is not None and self._artifacts.has(cached):
-            outputs = self._deserialize_output(self._artifacts.get(cached))
-            # Cache hit: no audit record. The 1.4 exit criterion requires
-            # that a re-run with unchanged inputs produces zero new audit
-            # records except the DAG-level start/end markers.
-            return StageResult(outputs, cached, True, CostUsage())
+        if cached is not None:
+            try:
+                outputs = self._deserialize_output(self._artifacts.get(cached))
+            except KeyError:
+                pass
+            else:
+                # Cache hit: no audit record. The 1.4 exit criterion requires
+                # that a re-run with unchanged inputs produces zero new audit
+                # records except the DAG-level start/end markers.
+                return StageResult(outputs, cached, True, CostUsage())
 
         ctx = StageContext(ceiling=self.cost_ceiling, access=self._access)
         outputs = self.compute(inputs, ctx)
@@ -241,26 +322,29 @@ class Stage:
             )
 
         out_bytes = self._serialize_output(outputs)
-        output_hash = self._artifacts.put(out_bytes)
+        output_hash = hashlib.sha256(out_bytes).hexdigest()
+        audit_record = {
+            "category": self.audit_category or self.audit_stage,
+            "stage": self.audit_stage,
+            "envelope": env,
+            "stage_name": self.name,
+            "stage_version": self.version,
+            "inputs_hash": inputs_hash,
+            "output_hash": output_hash,
+            "compute_cost": ctx.usage.compute_usd,
+            "llm_cost": ctx.usage.llm_usd,
+            "data_reads": ctx.usage.data_reads,
+        }
+        self._audit.validate_record(audit_record)
+
+        stored_hash = self._artifacts.put(out_bytes)
         self._artifacts.record_fingerprint(
             fp,
             stage_name=self.name,
             stage_version=self.version,
             inputs_hash=inputs_hash,
-            output_hash=output_hash,
+            output_hash=stored_hash,
         )
 
-        self._audit.append(
-            {
-                "category": self.audit_category,
-                "stage": self.name,
-                "envelope": env,
-                "stage_version": self.version,
-                "inputs_hash": inputs_hash,
-                "output_hash": output_hash,
-                "compute_cost": ctx.usage.compute_usd,
-                "llm_cost": ctx.usage.llm_usd,
-                "data_reads": ctx.usage.data_reads,
-            }
-        )
-        return StageResult(outputs, output_hash, False, ctx.usage)
+        self._audit.append(audit_record)
+        return StageResult(outputs, stored_hash, False, ctx.usage)

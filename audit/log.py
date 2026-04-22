@@ -92,6 +92,16 @@ class AuditLog:
 
     # --- public API -------------------------------------------------------
 
+    def validate_record(self, record: dict[str, Any]) -> None:
+        """Validate caller-supplied fields without appending.
+
+        This checks the same shape and JSON-serializability constraints as
+        :meth:`append`, but it does not inject defaults, compute hashes, or
+        consult the current chain tail. Callers that need to stage side effects
+        can use this to fail early before mutating other stores.
+        """
+        self._prepare_record(record, assign_defaults=False)
+
     def append(self, record: dict[str, Any]) -> str:
         """Append ``record`` to the current day's file, return its record_hash.
 
@@ -102,38 +112,8 @@ class AuditLog:
         ``record_hash`` and ``prev_hash`` are computed — supplying them is an
         error.
         """
-        if not isinstance(record, dict):
-            raise TypeError("record must be a dict")
-        rec: dict[str, Any] = dict(record)
-
-        if "record_hash" in rec:
-            raise ValueError("record_hash is computed; do not supply it")
-        if "prev_hash" in rec:
-            raise ValueError("prev_hash is computed; do not supply it")
-
-        ts = _ensure_utc(rec["timestamp"]) if "timestamp" in rec else datetime.now(timezone.utc)
-        rec["timestamp"] = ts.isoformat()
-
-        if "record_id" in rec:
-            if not isinstance(rec["record_id"], str) or not rec["record_id"]:
-                raise ValueError("record_id must be a non-empty string")
-        else:
-            rec["record_id"] = str(uuid.uuid4())
-
-        for field in ("category", "stage"):
-            val = rec.get(field)
-            if not isinstance(val, str) or not val:
-                raise ValueError(f"{field} is required and must be a non-empty string")
-
-        env = rec.get("envelope")
-        if not isinstance(env, dict):
-            raise ValueError("envelope is required and must be a dict")
-        extra = set(env.keys()) - _ENVELOPE_KEYS
-        if extra:
-            raise ValueError(
-                f"envelope keys must be subset of {sorted(_ENVELOPE_KEYS)}; "
-                f"unexpected: {sorted(extra)}"
-            )
+        rec = self._prepare_record(record, assign_defaults=True)
+        ts = _ensure_utc(rec["timestamp"])
 
         with self._lock:
             if self._last_timestamp_iso is not None:
@@ -240,6 +220,50 @@ class AuditLog:
                 rec = json.loads(last_line)
                 return rec["record_hash"], rec["timestamp"]
         return GENESIS_HASH, None
+
+    @staticmethod
+    def _prepare_record(
+        record: dict[str, Any],
+        *,
+        assign_defaults: bool,
+    ) -> dict[str, Any]:
+        if not isinstance(record, dict):
+            raise TypeError("record must be a dict")
+        rec: dict[str, Any] = dict(record)
+
+        if "record_hash" in rec:
+            raise ValueError("record_hash is computed; do not supply it")
+        if "prev_hash" in rec:
+            raise ValueError("prev_hash is computed; do not supply it")
+
+        if "timestamp" in rec:
+            rec["timestamp"] = _ensure_utc(rec["timestamp"]).isoformat()
+        elif assign_defaults:
+            rec["timestamp"] = datetime.now(timezone.utc).isoformat()
+
+        if "record_id" in rec:
+            if not isinstance(rec["record_id"], str) or not rec["record_id"]:
+                raise ValueError("record_id must be a non-empty string")
+        elif assign_defaults:
+            rec["record_id"] = str(uuid.uuid4())
+
+        for field in ("category", "stage"):
+            val = rec.get(field)
+            if not isinstance(val, str) or not val:
+                raise ValueError(f"{field} is required and must be a non-empty string")
+
+        env = rec.get("envelope")
+        if not isinstance(env, dict):
+            raise ValueError("envelope is required and must be a dict")
+        extra = set(env.keys()) - _ENVELOPE_KEYS
+        if extra:
+            raise ValueError(
+                f"envelope keys must be subset of {sorted(_ENVELOPE_KEYS)}; "
+                f"unexpected: {sorted(extra)}"
+            )
+
+        canonicalize(rec)
+        return rec
 
     @staticmethod
     def _verify_line(line: str, expected_prev: str, *, expected_day: date) -> bool:

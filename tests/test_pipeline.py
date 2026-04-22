@@ -61,9 +61,20 @@ class IntOutput:
     value: int
 
 
+@dataclass
+class NestedInner:
+    value: int
+
+
+@dataclass
+class NestedOutput:
+    inner: NestedInner
+
+
 class AddOne(Stage):
     name = "addone"
     version = "1"
+    audit_stage = "Represent"
     cost_ceiling = CostCeiling(compute_usd=1.0)
     InputType = IntInput
     OutputType = IntOutput
@@ -79,6 +90,7 @@ class AddOne(Stage):
 class Double(Stage):
     name = "double"
     version = "1"
+    audit_stage = "Represent"
     cost_ceiling = CostCeiling(compute_usd=1.0)
     InputType = IntInput
     OutputType = IntOutput
@@ -119,6 +131,28 @@ def test_artifact_store_fingerprint_roundtrip(artifacts: ArtifactStore) -> None:
     assert artifacts.lookup_fingerprint("nope") is None
 
 
+def test_artifact_store_rejects_conflicting_fingerprint_output(
+    artifacts: ArtifactStore,
+) -> None:
+    h1 = artifacts.put(b"payload-1")
+    h2 = artifacts.put(b"payload-2")
+    artifacts.record_fingerprint(
+        "fp1",
+        stage_name="s",
+        stage_version="1",
+        inputs_hash="i1",
+        output_hash=h1,
+    )
+    with pytest.raises(ValueError, match="fingerprint conflict"):
+        artifacts.record_fingerprint(
+            "fp1",
+            stage_name="s",
+            stage_version="1",
+            inputs_hash="i1",
+            output_hash=h2,
+        )
+
+
 def test_artifact_store_rejects_fingerprint_for_missing_artifact(
     artifacts: ArtifactStore,
 ) -> None:
@@ -144,8 +178,9 @@ def test_stage_run_emits_one_audit_record(
     records = _audit_records(audit)
     assert len(records) == 1
     r = records[0]
-    assert r["category"] == "Stage"
-    assert r["stage"] == "addone"
+    assert r["category"] == "Represent"
+    assert r["stage"] == "Represent"
+    assert r["stage_name"] == "addone"
     assert r["stage_version"] == "1"
     assert r["envelope"] == {"cycle_id": "c1"}
     assert r["output_hash"] == result.output_hash
@@ -230,6 +265,61 @@ def test_stage_requires_name_and_version(
 
     with pytest.raises(ValueError):
         NoVersion(artifacts=artifacts, audit=audit)
+
+
+def test_stage_rejects_invalid_envelope_before_caching(
+    artifacts: ArtifactStore, audit: AuditLog
+) -> None:
+    stage = AddOne(artifacts=artifacts, audit=audit)
+    _, fp = stage.fingerprint(IntInput(value=3))
+    with pytest.raises(ValueError, match="envelope keys must be subset"):
+        stage.run(IntInput(value=3), envelope={"bad": "x"})
+    assert _audit_records(audit) == []
+    assert artifacts.lookup_fingerprint(fp) is None
+
+
+def test_stage_recovers_when_cached_blob_is_missing(
+    artifacts: ArtifactStore, audit: AuditLog
+) -> None:
+    stage = AddOne(artifacts=artifacts, audit=audit)
+    first = stage.run(IntInput(value=3))
+    blob_path = (
+        artifacts._objects_root / first.output_hash[:2] / first.output_hash
+    )
+    blob_path.unlink()
+
+    second = stage.run(IntInput(value=3))
+    assert second.cache_hit is False
+    assert second.outputs == first.outputs
+    assert second.output_hash == first.output_hash
+    assert len(_audit_records(audit)) == 2
+
+
+def test_stage_nested_dataclass_output_roundtrips_on_cache_hit(
+    artifacts: ArtifactStore, audit: AuditLog
+) -> None:
+    class NestedStage(Stage):
+        name = "nested"
+        version = "1"
+        audit_stage = "Represent"
+        cost_ceiling = CostCeiling(compute_usd=1.0)
+        InputType = IntInput
+        OutputType = NestedOutput
+
+        def compute(self, inputs, ctx):
+            ctx.charge_compute(0.01)
+            return NestedOutput(inner=NestedInner(value=inputs.value + 1))
+
+        def invariant(self, inputs, outputs):
+            assert outputs.inner.value == inputs.value + 1
+
+    stage = NestedStage(artifacts=artifacts, audit=audit)
+    first = stage.run(IntInput(value=3))
+    second = stage.run(IntInput(value=3))
+    assert first.cache_hit is False
+    assert second.cache_hit is True
+    assert isinstance(second.outputs.inner, NestedInner)
+    assert second.outputs == NestedOutput(inner=NestedInner(value=4))
 
 
 # --- cost ceiling ----------------------------------------------------------
@@ -335,6 +425,7 @@ def test_dag_refuses_stage_without_invariant(
     class NoInvariant(Stage):
         name = "noinv"
         version = "1"
+        audit_stage = "Represent"
         cost_ceiling = CostCeiling(compute_usd=1.0)
         InputType = IntInput
         OutputType = IntOutput
@@ -356,6 +447,7 @@ def test_dag_refuses_stage_without_compute(
     class NoCompute(Stage):
         name = "nocompute"
         version = "1"
+        audit_stage = "Represent"
         cost_ceiling = CostCeiling(compute_usd=1.0)
         InputType = IntInput
         OutputType = IntOutput
@@ -393,9 +485,13 @@ def test_dag_emits_run_start_and_run_end_markers(
     dag.run({"x": 5})
     records = _audit_records(audit)
     # 1 run_start + 2 stage records + 1 run_end
-    assert records[0]["category"] == "DAGRun"
+    assert records[0]["category"] == "Audit"
+    assert records[0]["stage"] == "Audit"
+    assert records[0]["record_type"] == "DAGRun"
     assert records[0]["event"] == "run_start"
-    assert records[-1]["category"] == "DAGRun"
+    assert records[-1]["category"] == "Audit"
+    assert records[-1]["stage"] == "Audit"
+    assert records[-1]["record_type"] == "DAGRun"
     assert records[-1]["event"] == "run_end"
     assert records[-1]["status"] == "success"
     assert records[0]["run_id"] == records[-1]["run_id"]
@@ -410,19 +506,19 @@ def test_rerun_unchanged_dag_emits_only_dag_markers(
 ) -> None:
     """The 1.4 exit criterion: re-running an unchanged DAG must produce
     zero new audit records other than the re-run's DAG-level start/end
-    markers. Stage cache hits must NOT write any record - not even a
-    "skipped" marker - or the ledger grows unboundedly on idempotent
+    markers. Stage cache hits must NOT write any record — not even a
+    "skipped" marker — or the ledger grows unboundedly on idempotent
     reruns, which breaks the chain's cost and readability guarantees."""
     dag = _make_dag(audit, artifacts)
     dag.run({"x": 5})
     first_pass = _audit_records(audit)
     # Expect 1 start + 2 stage + 1 end = 4 records.
     assert len(first_pass) == 4
-    assert [r.get("event") for r in first_pass if r["category"] == "DAGRun"] == [
+    assert [r.get("event") for r in first_pass if r.get("record_type") == "DAGRun"] == [
         "run_start",
         "run_end",
     ]
-    assert [r["stage"] for r in first_pass if r["category"] == "Stage"] == [
+    assert [r["stage_name"] for r in first_pass if r["category"] == "Represent"] == [
         "addone",
         "double",
     ]
@@ -432,7 +528,8 @@ def test_rerun_unchanged_dag_emits_only_dag_markers(
     new_records = second_pass[len(first_pass):]
     assert len(new_records) == 2
     assert [r["event"] for r in new_records] == ["run_start", "run_end"]
-    assert all(r["category"] == "DAGRun" for r in new_records)
+    assert all(r["category"] == "Audit" for r in new_records)
+    assert all(r["record_type"] == "DAGRun" for r in new_records)
     # And the DAG signature is identical across the two runs.
     starts = [r for r in second_pass if r.get("event") == "run_start"]
     assert starts[0]["dag_signature"] == starts[1]["dag_signature"]
@@ -450,16 +547,68 @@ def test_rerun_with_changed_input_re_executes(
     dag = _make_dag(audit, artifacts)
     dag.run({"x": 5})
     first_pass = len(_audit_records(audit))
-    dag.run({"x": 6})  # different initial input -> different inputs_hash
+    dag.run({"x": 6})  # different initial input → different inputs_hash
     new = _audit_records(audit)[first_pass:]
-    # run_start + 2 stage records (both miss) + run_end
-    kinds = [(r["category"], r.get("event") or r["stage"]) for r in new]
-    assert kinds == [
-        ("DAGRun", "run_start"),
-        ("Stage", "addone"),
-        ("Stage", "double"),
-        ("DAGRun", "run_end"),
+    # run_start + 2 stage records (both miss) + run_end.
+    kinds = [
+        (
+            r["category"],
+            r.get("event") or r.get("stage_name"),
+        )
+        for r in new
     ]
+    assert kinds == [
+        ("Audit", "run_start"),
+        ("Represent", "addone"),
+        ("Represent", "double"),
+        ("Audit", "run_end"),
+    ]
+
+
+def test_dag_signature_changes_on_binding_and_version_changes(
+    artifacts: ArtifactStore, audit: AuditLog
+) -> None:
+    class DoubleV2(Double):
+        version = "2"
+
+    base = _make_dag(audit, artifacts)
+
+    different_binding = PipelineDAG(audit=audit, envelope={"cycle_id": "c1"})
+    different_binding.add(
+        AddOne(artifacts=artifacts, audit=audit),
+        inputs=lambda init, results: IntInput(value=init["x"]),
+    )
+    different_binding.add(
+        Double(artifacts=artifacts, audit=audit),
+        inputs=lambda init, results: IntInput(value=init["x"]),
+    )
+
+    different_version = PipelineDAG(audit=audit, envelope={"cycle_id": "c1"})
+    different_version.add(
+        AddOne(artifacts=artifacts, audit=audit),
+        inputs=lambda init, results: IntInput(value=init["x"]),
+    )
+    different_version.add(
+        DoubleV2(artifacts=artifacts, audit=audit),
+        inputs=lambda init, results: IntInput(value=results["addone"].value),
+    )
+
+    assert base.signature() != different_binding.signature()
+    assert base.signature() != different_version.signature()
+
+
+def test_dag_merges_per_stage_envelope_delta(
+    artifacts: ArtifactStore, audit: AuditLog
+) -> None:
+    dag = PipelineDAG(audit=audit, envelope={"cycle_id": "c1"})
+    dag.add(
+        AddOne(artifacts=artifacts, audit=audit),
+        inputs=lambda init, results: IntInput(value=init["x"]),
+        envelope=lambda init, results: {"rule_id": "r-1"},
+    )
+    dag.run({"x": 5})
+    stage_record = [r for r in _audit_records(audit) if r["category"] == "Represent"][0]
+    assert stage_record["envelope"] == {"cycle_id": "c1", "rule_id": "r-1"}
 
 
 def test_dag_run_end_marker_still_emitted_on_failure(
@@ -480,7 +629,7 @@ def test_dag_run_end_marker_still_emitted_on_failure(
     with pytest.raises(RuntimeError, match="boom"):
         dag.run({"x": 5})
     records = _audit_records(audit)
-    events = [r.get("event") for r in records if r["category"] == "DAGRun"]
+    events = [r.get("event") for r in records if r.get("record_type") == "DAGRun"]
     assert events == ["run_start", "run_end"]
     end = [r for r in records if r.get("event") == "run_end"][0]
     assert end["status"] == "error"
@@ -503,6 +652,7 @@ class ReadOutput:
 class ReadStage(Stage):
     name = "readstage"
     version = "1"
+    audit_stage = "Represent"
     cost_ceiling = CostCeiling(compute_usd=0.0, data_reads=1)
     InputType = ReadInput
     OutputType = ReadOutput
@@ -550,13 +700,13 @@ def test_stage_with_access_layer_reads_via_access(tmp_path: Path) -> None:
         # Access record for the get + Stage record for the stage + DAG
         # start + DAG end = 4.
         categories = [r["category"] for r in records_after_first]
-        assert categories == ["DAGRun", "Access", "Stage", "DAGRun"]
+        assert categories == ["Audit", "Access", "Represent", "Audit"]
 
         dag.run({})
         new = _audit_records(audit)[len(records_after_first):]
         # On re-run the compute is skipped, so no Access record, no
         # Stage record -- only the DAG markers.
-        assert [r["category"] for r in new] == ["DAGRun", "DAGRun"]
+        assert [r["category"] for r in new] == ["Audit", "Audit"]
         assert [r.get("event") for r in new] == ["run_start", "run_end"]
     finally:
         artifacts.close()

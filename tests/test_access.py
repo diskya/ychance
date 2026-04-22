@@ -51,10 +51,13 @@ def _audit_records(log: AuditLog) -> list[dict]:
 
 # --- construction ----------------------------------------------------------
 
-def test_access_is_an_authorized_reader(stack):
+def test_access_does_not_expose_rawstore_reader_capability(stack):
     from rawstore import AuthorizedReader
-    _, _, access = stack
-    assert isinstance(access, AuthorizedReader)
+    store, _, access = stack
+    h = store.put(b"guarded", _prov())
+    assert not isinstance(access, AuthorizedReader)
+    with pytest.raises(PermissionError):
+        store.get(h, reader=access)  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize(

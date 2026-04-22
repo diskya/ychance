@@ -11,7 +11,7 @@ stage whose inputs are unchanged.
 
 The store is deliberately thinner than ``RawStore``:
 
-- No provenance, no corrections, no authorized-reader gate - artifacts
+- No provenance, no corrections, no authorized-reader gate — artifacts
   are reproducible from their inputs, so the integrity story is
   "recompute and compare hashes" rather than "audit every read".
 - No per-day directory layout. Artifacts dedup aggressively, so a flat
@@ -94,21 +94,28 @@ class ArtifactStore:
             cur.execute("BEGIN IMMEDIATE")
             try:
                 row = cur.execute(
-                    "SELECT 1 FROM artifacts WHERE hash = ?", (h,)
+                    "SELECT bytes_path FROM artifacts WHERE hash = ?", (h,)
                 ).fetchone()
                 if row is None:
                     prefix_dir = self._objects_root / h[:2]
                     prefix_dir.mkdir(parents=True, exist_ok=True)
                     blob_path = prefix_dir / h
+                    rel = blob_path.relative_to(self._objects_root).as_posix()
                     tmp_path = prefix_dir / (h + ".tmp")
                     tmp_path.write_bytes(data)
                     tmp_path.replace(blob_path)
-                    rel = blob_path.relative_to(self._objects_root).as_posix()
                     cur.execute(
                         "INSERT INTO artifacts(hash, bytes_path, bytes_size, created_utc) "
                         "VALUES (?, ?, ?, ?)",
                         (h, rel, len(data), datetime.now(timezone.utc).isoformat()),
                     )
+                else:
+                    blob_path = self._objects_root / row[0]
+                    if not blob_path.exists():
+                        blob_path.parent.mkdir(parents=True, exist_ok=True)
+                        tmp_path = blob_path.parent / (h + ".tmp")
+                        tmp_path.write_bytes(data)
+                        tmp_path.replace(blob_path)
                 cur.execute("COMMIT")
             except Exception:
                 cur.execute("ROLLBACK")
@@ -122,14 +129,19 @@ class ArtifactStore:
             ).fetchone()
         if row is None:
             raise KeyError(hash)
-        return (self._objects_root / row[0]).read_bytes()
+        path = self._objects_root / row[0]
+        if not path.exists():
+            raise KeyError(hash)
+        return path.read_bytes()
 
     def has(self, hash: str) -> bool:
         with self._lock:
             row = self._conn.execute(
-                "SELECT 1 FROM artifacts WHERE hash = ?", (hash,)
+                "SELECT bytes_path FROM artifacts WHERE hash = ?", (hash,)
             ).fetchone()
-        return row is not None
+        if row is None:
+            return False
+        return (self._objects_root / row[0]).exists()
 
     # --- fingerprints -----------------------------------------------------
 
@@ -144,18 +156,29 @@ class ArtifactStore:
     ) -> None:
         """Persist ``(stage, version, inputs_hash) -> output_hash``.
 
-        Uses INSERT OR REPLACE so a re-run that produces an identical
-        output_hash is a no-op and a re-run that produces a *different*
-        output_hash (a bug, since inputs are unchanged) overwrites the
-        stale entry rather than silently diverging.
+        A repeat write of the same ``output_hash`` is a no-op. A conflicting
+        ``output_hash`` for the same fingerprint is rejected: unchanged inputs
+        and unchanged stage version must not silently diverge.
         """
         if not self.has(output_hash):
             raise KeyError(
                 f"cannot record fingerprint for missing artifact {output_hash}"
             )
         with self._lock:
+            row = self._conn.execute(
+                "SELECT output_hash FROM fingerprints WHERE fingerprint = ?",
+                (fingerprint,),
+            ).fetchone()
+            if row is not None:
+                existing = row[0]
+                if existing != output_hash:
+                    raise ValueError(
+                        "fingerprint conflict: unchanged inputs/version produced "
+                        f"{output_hash}, existing cache points to {existing}"
+                    )
+                return
             self._conn.execute(
-                "INSERT OR REPLACE INTO fingerprints("
+                "INSERT INTO fingerprints("
                 "fingerprint, stage_name, stage_version, inputs_hash, "
                 "output_hash, created_utc) VALUES (?, ?, ?, ?, ?, ?)",
                 (
