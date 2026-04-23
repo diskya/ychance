@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(/home/ubuntu/ychance/.claude/scripts/codex-worker.sh:*)",
+      "Bash(git -C /home/ubuntu/ychance status:*)",
+      "Bash(git -C /home/ubuntu/ychance diff:*)"
+    ]
+  }
+}
