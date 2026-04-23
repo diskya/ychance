@@ -1,0 +1,19 @@
+{
+  "cik": "0000320193",
+  "entityType": "operating",
+  "name": "Apple Inc.",
+  "filings": {
+    "recent": {
+      "accessionNumber": [
+        "0001140361-26-015711"
+      ],
+      "filingDate": [
+        "2026-04-20"
+      ],
+      "form": [
+        "8-K"
+      ]
+    },
+    "files": []
+  }
+}

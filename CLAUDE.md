@@ -1,6 +1,6 @@
 # CLAUDE.md — Manager-role instructions for ychance
 
-Read `Objective.md` §0 and §7 first; they are the constitution and override anything here.
+Read `Objective.md` §0 and §7 first; they are the constitution and override anything here. Then read `STATUS.md` for current build state, decisions carried forward, and the next unstarted phase.
 
 ## Your role: manager only
 

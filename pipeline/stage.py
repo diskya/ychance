@@ -184,6 +184,9 @@ class Stage:
         audit_stage       — one of the architecture stages from §6.1.
         audit_category    — defaults to ``audit_stage``; override when a stage
                             needs a narrower §6.9 category name.
+        audit_extra_payload
+                          — returns category-specific audit fields to merge
+                            into the base Stage audit record.
         _serialize_output / _deserialize_output
                           — for output types that canonical JSON does not
                             round-trip cleanly (bytes, custom classes, …).
@@ -265,6 +268,18 @@ class Stage:
             return _from_jsonable(self.OutputType, obj)
         return obj
 
+    def audit_extra_payload(
+        self,
+        inputs: Any,
+        outputs: Any,
+        ctx: StageContext,
+        *,
+        inputs_hash: str,
+        output_hash: str,
+    ) -> dict[str, Any]:
+        """Return category-specific fields to merge into the audit payload."""
+        return {}
+
     # --- main entry point -------------------------------------------------
 
     def fingerprint(self, inputs: Any) -> tuple[str, str]:
@@ -335,6 +350,16 @@ class Stage:
             "llm_cost": ctx.usage.llm_usd,
             "data_reads": ctx.usage.data_reads,
         }
+        extra_payload = self.audit_extra_payload(
+            inputs,
+            outputs,
+            ctx,
+            inputs_hash=inputs_hash,
+            output_hash=output_hash,
+        )
+        if not isinstance(extra_payload, dict):
+            raise TypeError("audit_extra_payload must return a dict")
+        audit_record.update(extra_payload)
         self._audit.validate_record(audit_record)
 
         stored_hash = self._artifacts.put(out_bytes)
