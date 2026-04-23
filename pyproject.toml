@@ -3,7 +3,9 @@ name = "ychance"
 version = "0.0.0"
 description = "Discovery-loop methodology runtime"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "numpy>=2.4.4",
+]
 
 [dependency-groups]
 dev = [
