@@ -10,18 +10,19 @@ raw store passes through ``AccessLayer``, which:
 3. Appends an audit record (via the 1.2 audit log) for every read attempt
    — admitted, denied for peek, or denied by rate limit.
 
-The raw store refuses reads from any caller that is not an
-``AuthorizedReader``. ``AccessLayer`` owns a private reader capability and
-does not expose that reader on its public API surface.
+The raw store refuses reads from any caller that does not hold a capability
+minted by that specific ``RawStore`` instance. ``AccessLayer`` acquires one at
+construction time and keeps it inside per-instance closures rather than on its
+public API surface.
 """
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
 
 from audit import AuditLog
-from rawstore import AuthorizedReader, Provenance, RawStore
+from rawstore import Provenance, RawStore
 
 
 class RateLimitExceeded(RuntimeError):
@@ -40,10 +41,6 @@ def _ensure_utc(ts: datetime) -> datetime:
     return ts.astimezone(timezone.utc)
 
 
-class _AccessReader(AuthorizedReader):
-    """Internal raw-store capability owned by one AccessLayer instance."""
-
-
 class AccessLayer:
     """Thin wrapper over ``RawStore`` enforcing temporal admissibility,
     per-cycle read rate limit, and audit logging.
@@ -51,6 +48,10 @@ class AccessLayer:
     One instance corresponds to one read budget. ``begin_cycle`` rolls the
     cycle id and resets the counter.
     """
+
+    get: Callable[[str, datetime], bytes]
+    provenance: Callable[[str, datetime], list[Provenance]]
+    corrections: Callable[[str, datetime], list[str]]
 
     def __init__(
         self,
@@ -68,12 +69,102 @@ class AccessLayer:
             raise ValueError("cycle_id must be a non-empty string")
         if not isinstance(max_reads_per_cycle, int) or max_reads_per_cycle < 0:
             raise ValueError("max_reads_per_cycle must be a non-negative int")
-        self.__store = store
         self.__audit = audit
-        self.__reader = _AccessReader()
         self._cycle_id = cycle_id
         self._max_reads = max_reads_per_cycle
         self._count = 0
+
+        reader = store._issue_reader()
+
+        def get(hash: str, query_time: datetime) -> bytes:
+            """Return raw bytes iff an admissible provenance exists at ``query_time``.
+
+            Raises ``KeyError`` for unknown hashes, ``TemporalAdmissibilityError``
+            when no provenance has ``vendor_timestamp ≤ query_time``, and
+            ``RateLimitExceeded`` once the cycle budget is exhausted.
+            """
+            qt = _ensure_utc(query_time)
+            self._enforce_budget(hash=hash, qt=qt, kind="bytes")
+            provs = store.provenance(hash, reader=reader)
+            if not provs:
+                self._log_read(hash, qt, kind="bytes", outcome="unknown")
+                raise KeyError(hash)
+            earliest = min(p.vendor_timestamp for p in provs)
+            if earliest > qt:
+                self._log_read(
+                    hash,
+                    qt,
+                    kind="bytes",
+                    outcome="future_denied",
+                    earliest_vendor_timestamp=earliest.isoformat(),
+                )
+                raise TemporalAdmissibilityError(
+                    f"hash {hash}: earliest vendor_timestamp "
+                    f"{earliest.isoformat()} > query_time {qt.isoformat()}"
+                )
+            data = store.get(hash, reader=reader)
+            self._count += 1
+            self._log_read(
+                hash,
+                qt,
+                kind="bytes",
+                outcome="ok",
+                bytes_size=len(data),
+            )
+            return data
+
+        def provenance(hash: str, query_time: datetime) -> list[Provenance]:
+            """Return provenance triples whose ``vendor_timestamp ≤ query_time``.
+
+            Triples from the future are filtered out; an unknown hash or an
+            entry with no admissible provenance both yield an empty list. An
+            empty return is therefore indistinguishable between "not known" and
+            "not yet visible" — Propose cannot peek by polling.
+            """
+            qt = _ensure_utc(query_time)
+            self._enforce_budget(hash=hash, qt=qt, kind="provenance")
+            triples = store.provenance(hash, reader=reader)
+            visible = [p for p in triples if p.vendor_timestamp <= qt]
+            self._count += 1
+            self._log_read(
+                hash,
+                qt,
+                kind="provenance",
+                outcome="ok",
+                returned=len(visible),
+                suppressed=len(triples) - len(visible),
+            )
+            return visible
+
+        def corrections(hash: str, query_time: datetime) -> list[str]:
+            """Return correction-hashes whose own earliest vendor_timestamp ≤ ``query_time``."""
+            qt = _ensure_utc(query_time)
+            self._enforce_budget(hash=hash, qt=qt, kind="corrections")
+            all_links = store.corrections(hash, reader=reader)
+            visible: list[str] = []
+            suppressed = 0
+            for ch in all_links:
+                c_provs = store.provenance(ch, reader=reader)
+                if c_provs and min(p.vendor_timestamp for p in c_provs) <= qt:
+                    visible.append(ch)
+                else:
+                    suppressed += 1
+            self._count += 1
+            self._log_read(
+                hash,
+                qt,
+                kind="corrections",
+                outcome="ok",
+                returned=len(visible),
+                suppressed=suppressed,
+            )
+            return visible
+
+        # Keep the store handle and its reader capability out of AccessLayer
+        # attributes. Normal callers only see the audited/budgeted surface.
+        self.get = get
+        self.provenance = provenance
+        self.corrections = corrections
 
     # --- cycle control ---------------------------------------------------
 
@@ -99,92 +190,6 @@ class AccessLayer:
             raise ValueError("cycle_id must be a non-empty string")
         self._cycle_id = cycle_id
         self._count = 0
-
-    # --- read surface ----------------------------------------------------
-
-    def get(self, hash: str, query_time: datetime) -> bytes:
-        """Return raw bytes iff an admissible provenance exists at ``query_time``.
-
-        Raises ``KeyError`` for unknown hashes, ``TemporalAdmissibilityError``
-        when no provenance has ``vendor_timestamp ≤ query_time``, and
-        ``RateLimitExceeded`` once the cycle budget is exhausted.
-        """
-        qt = _ensure_utc(query_time)
-        self._enforce_budget(hash=hash, qt=qt, kind="bytes")
-        provs = self.__store.provenance(hash, reader=self.__reader)
-        if not provs:
-            self._log_read(hash, qt, kind="bytes", outcome="unknown")
-            raise KeyError(hash)
-        earliest = min(p.vendor_timestamp for p in provs)
-        if earliest > qt:
-            self._log_read(
-                hash,
-                qt,
-                kind="bytes",
-                outcome="future_denied",
-                earliest_vendor_timestamp=earliest.isoformat(),
-            )
-            raise TemporalAdmissibilityError(
-                f"hash {hash}: earliest vendor_timestamp "
-                f"{earliest.isoformat()} > query_time {qt.isoformat()}"
-            )
-        data = self.__store.get(hash, reader=self.__reader)
-        self._count += 1
-        self._log_read(
-            hash,
-            qt,
-            kind="bytes",
-            outcome="ok",
-            bytes_size=len(data),
-        )
-        return data
-
-    def provenance(self, hash: str, query_time: datetime) -> list[Provenance]:
-        """Return provenance triples whose ``vendor_timestamp ≤ query_time``.
-
-        Triples from the future are filtered out; an unknown hash or an
-        entry with no admissible provenance both yield an empty list. An
-        empty return is therefore indistinguishable between "not known" and
-        "not yet visible" — Propose cannot peek by polling.
-        """
-        qt = _ensure_utc(query_time)
-        self._enforce_budget(hash=hash, qt=qt, kind="provenance")
-        triples = self.__store.provenance(hash, reader=self.__reader)
-        visible = [p for p in triples if p.vendor_timestamp <= qt]
-        self._count += 1
-        self._log_read(
-            hash,
-            qt,
-            kind="provenance",
-            outcome="ok",
-            returned=len(visible),
-            suppressed=len(triples) - len(visible),
-        )
-        return visible
-
-    def corrections(self, hash: str, query_time: datetime) -> list[str]:
-        """Return correction-hashes whose own earliest vendor_timestamp ≤ ``query_time``."""
-        qt = _ensure_utc(query_time)
-        self._enforce_budget(hash=hash, qt=qt, kind="corrections")
-        all_links = self.__store.corrections(hash, reader=self.__reader)
-        visible: list[str] = []
-        suppressed = 0
-        for ch in all_links:
-            c_provs = self.__store.provenance(ch, reader=self.__reader)
-            if c_provs and min(p.vendor_timestamp for p in c_provs) <= qt:
-                visible.append(ch)
-            else:
-                suppressed += 1
-        self._count += 1
-        self._log_read(
-            hash,
-            qt,
-            kind="corrections",
-            outcome="ok",
-            returned=len(visible),
-            suppressed=suppressed,
-        )
-        return visible
 
     # --- internals -------------------------------------------------------
 

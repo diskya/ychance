@@ -52,12 +52,20 @@ def _audit_records(log: AuditLog) -> list[dict]:
 # --- construction ----------------------------------------------------------
 
 def test_access_does_not_expose_rawstore_reader_capability(stack):
-    from rawstore import AuthorizedReader
     store, _, access = stack
     h = store.put(b"guarded", _prov())
-    assert not isinstance(access, AuthorizedReader)
+    assert not hasattr(access, "_AccessLayer__store")
+    assert not hasattr(access, "_AccessLayer__reader")
     with pytest.raises(PermissionError):
         store.get(h, reader=access)  # type: ignore[arg-type]
+
+
+def test_access_hides_store_bound_reader_from_attribute_lookup(stack):
+    _, _, access = stack
+    with pytest.raises(AttributeError):
+        _ = access._AccessLayer__store
+    with pytest.raises(AttributeError):
+        _ = access._AccessLayer__reader
 
 
 @pytest.mark.parametrize(

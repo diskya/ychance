@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import sqlite3
 import threading
+import weakref
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import NamedTuple, Optional
@@ -23,27 +24,14 @@ class Provenance(NamedTuple):
     vendor_timestamp: datetime
 
 
-class AuthorizedReader:
-    """Marker base class for the sole read path into ``RawStore``.
+class _IssuedReader:
+    """Opaque per-store read capability.
 
-    Methodology §6.2 ("Representation for Propose") requires every read of the
-    raw store to pass through the access layer (temporal admissibility, rate
-    limit, audit). ``RawStore`` enforces this by refusing any reader that does
-    not subclass ``AuthorizedReader``. In application code the access layer
-    owns a private ``AuthorizedReader`` capability; callers are not supposed to
-    hold raw-store reader objects directly.
+    The class itself is not a capability boundary; authorization is by object
+    identity against the issuing ``RawStore`` instance's private registry.
     """
 
-    __slots__ = ()
-
-
-def _require_reader(reader: object) -> None:
-    if not isinstance(reader, AuthorizedReader):
-        raise PermissionError(
-            "RawStore reads must be issued through access.AccessLayer "
-            "(an AuthorizedReader instance); direct access is forbidden "
-            "by methodology §6.2."
-        )
+    __slots__ = ("__weakref__",)
 
 
 _SCHEMA = """
@@ -99,6 +87,7 @@ class RawStore:
         self._bytes_root.mkdir(exist_ok=True)
         self._db_path = self._root / "index.sqlite"
         self._lock = threading.Lock()
+        self.__readers: weakref.WeakSet[_IssuedReader] = weakref.WeakSet()
         self._conn = sqlite3.connect(
             self._db_path, check_same_thread=False, isolation_level=None
         )
@@ -115,6 +104,23 @@ class RawStore:
 
     def __exit__(self, exc_type, exc, tb) -> None:
         self.close()
+
+    def _issue_reader(self) -> object:
+        """Mint a store-local read capability for trusted callers.
+
+        Package-private. AccessLayer uses this during construction, then keeps
+        the resulting capability in closures rather than on its public surface.
+        """
+        reader = _IssuedReader()
+        self.__readers.add(reader)
+        return reader
+
+    def _require_reader(self, reader: object) -> None:
+        if reader not in self.__readers:
+            raise PermissionError(
+                "RawStore reads require a capability issued by this RawStore "
+                "instance; direct access is forbidden by methodology §6.2."
+            )
 
     def put(
         self,
@@ -185,8 +191,8 @@ class RawStore:
 
         return h
 
-    def get(self, hash: str, *, reader: AuthorizedReader) -> bytes:
-        _require_reader(reader)
+    def get(self, hash: str, *, reader: object) -> bytes:
+        self._require_reader(reader)
         with self._lock:
             row = self._conn.execute(
                 "SELECT bytes_path FROM blobs WHERE hash = ?", (hash,)
@@ -195,8 +201,8 @@ class RawStore:
             raise KeyError(hash)
         return (self._bytes_root / row[0]).read_bytes()
 
-    def provenance(self, hash: str, *, reader: AuthorizedReader) -> list[Provenance]:
-        _require_reader(reader)
+    def provenance(self, hash: str, *, reader: object) -> list[Provenance]:
+        self._require_reader(reader)
         with self._lock:
             rows = self._conn.execute(
                 "SELECT source_id, fetch_time_utc, vendor_timestamp_utc "
@@ -209,8 +215,8 @@ class RawStore:
             for r in rows
         ]
 
-    def corrections(self, hash: str, *, reader: AuthorizedReader) -> list[str]:
-        _require_reader(reader)
+    def corrections(self, hash: str, *, reader: object) -> list[str]:
+        self._require_reader(reader)
         with self._lock:
             rows = self._conn.execute(
                 "SELECT correction_hash FROM corrections "
@@ -219,8 +225,8 @@ class RawStore:
             ).fetchall()
         return [r[0] for r in rows]
 
-    def has(self, hash: str, *, reader: AuthorizedReader) -> bool:
-        _require_reader(reader)
+    def has(self, hash: str, *, reader: object) -> bool:
+        self._require_reader(reader)
         with self._lock:
             row = self._conn.execute(
                 "SELECT 1 FROM blobs WHERE hash = ?", (hash,)

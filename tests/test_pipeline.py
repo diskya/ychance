@@ -611,6 +611,63 @@ def test_dag_merges_per_stage_envelope_delta(
     assert stage_record["envelope"] == {"cycle_id": "c1", "rule_id": "r-1"}
 
 
+def test_dag_rejects_binding_without_code_object(
+    artifacts: ArtifactStore, audit: AuditLog
+) -> None:
+    """functools.partial and other synthetic callables carry no __code__.
+    Two such bindings could hash-collide and make the DAG signature lie
+    about shape, so the DAG refuses them unless the caller commits to an
+    explicit __pipeline_signature__."""
+    import functools
+
+    def _bind(init, results, *, key):
+        return IntInput(value=init[key])
+
+    partial_binding = functools.partial(_bind, key="x")
+
+    dag = PipelineDAG(audit=audit)
+    with pytest.raises(TypeError, match="__pipeline_signature__"):
+        dag.add(
+            AddOne(artifacts=artifacts, audit=audit),
+            inputs=partial_binding,
+        )
+
+    # Opting in with an explicit id is accepted and stable.
+    partial_binding.__pipeline_signature__ = "bind-x-v1"  # type: ignore[attr-defined]
+    dag.add(
+        AddOne(artifacts=artifacts, audit=audit),
+        inputs=partial_binding,
+    )
+    assert dag.signature()  # does not raise
+
+
+def test_dag_run_end_records_per_stage_envelope(
+    artifacts: ArtifactStore, audit: AuditLog
+) -> None:
+    """Per-stage envelope deltas must surface in run_end so an auditor can
+    filter by rule_id without scanning every stage record."""
+    dag = PipelineDAG(audit=audit, envelope={"cycle_id": "c1"})
+    dag.add(
+        AddOne(artifacts=artifacts, audit=audit),
+        inputs=lambda init, results: IntInput(value=init["x"]),
+        envelope=lambda init, results: {"rule_id": "r-1"},
+    )
+    dag.add(
+        Double(artifacts=artifacts, audit=audit),
+        inputs=lambda init, results: IntInput(value=results["addone"].value),
+    )
+    dag.run({"x": 5})
+    end = [
+        r for r in _audit_records(audit)
+        if r.get("event") == "run_end"
+    ][0]
+    stages = {s["name"]: s for s in end["stages"]}
+    assert stages["addone"]["status"] == "success"
+    assert stages["addone"]["envelope"] == {"cycle_id": "c1", "rule_id": "r-1"}
+    assert stages["double"]["status"] == "success"
+    assert stages["double"]["envelope"] == {"cycle_id": "c1"}
+
+
 def test_dag_run_end_marker_still_emitted_on_failure(
     artifacts: ArtifactStore, audit: AuditLog
 ) -> None:
@@ -625,6 +682,11 @@ def test_dag_run_end_marker_still_emitted_on_failure(
     dag.add(
         Fails(artifacts=artifacts, audit=audit),
         inputs=lambda init, results: IntInput(value=init["x"]),
+        envelope=lambda init, results: {"rule_id": "r-1"},
+    )
+    dag.add(
+        Double(artifacts=artifacts, audit=audit),
+        inputs=lambda init, results: IntInput(value=results["fails"].value),
     )
     with pytest.raises(RuntimeError, match="boom"):
         dag.run({"x": 5})
@@ -634,6 +696,13 @@ def test_dag_run_end_marker_still_emitted_on_failure(
     end = [r for r in records if r.get("event") == "run_end"][0]
     assert end["status"] == "error"
     assert end["error"]["failed_stage"] == "fails"
+    stages = {s["name"]: s for s in end["stages"]}
+    assert stages["fails"]["status"] == "error"
+    assert stages["fails"]["envelope"] == {"cycle_id": "c1", "rule_id": "r-1"}
+    assert stages["fails"]["cache_hit"] is None
+    assert stages["fails"]["output_hash"] is None
+    assert stages["double"]["status"] == "not_started"
+    assert stages["double"]["envelope"] is None
 
 
 # --- integration: stage with an AccessLayer --------------------------------

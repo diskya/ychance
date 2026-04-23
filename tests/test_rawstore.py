@@ -7,18 +7,10 @@ from pathlib import Path
 import pytest
 from hypothesis import given, settings, strategies as st
 
-from rawstore import AuthorizedReader, Provenance, RawStore
+from rawstore import Provenance, RawStore
 
 
 BASE_T = datetime(2026, 4, 22, 0, 0, 0, tzinfo=timezone.utc)
-
-
-class _StorageReader(AuthorizedReader):
-    """Bare reader for low-level storage tests. Not a production path."""
-    pass
-
-
-READER = _StorageReader()
 
 
 def _prov(
@@ -42,16 +34,21 @@ def store(tmp_path: Path):
         s.close()
 
 
-def test_put_get_roundtrip(store: RawStore) -> None:
+@pytest.fixture
+def reader(store: RawStore):
+    return store._issue_reader()
+
+
+def test_put_get_roundtrip(store: RawStore, reader: object) -> None:
     data = b"hello world"
     h = store.put(data, _prov())
     assert h == hashlib.sha256(data).hexdigest()
-    assert store.get(h, reader=READER) == data
+    assert store.get(h, reader=reader) == data
 
 
-def test_get_unknown_hash_raises(store: RawStore) -> None:
+def test_get_unknown_hash_raises(store: RawStore, reader: object) -> None:
     with pytest.raises(KeyError):
-        store.get("0" * 64, reader=READER)
+        store.get("0" * 64, reader=reader)
 
 
 def test_read_without_reader_rejected(store: RawStore) -> None:
@@ -64,6 +61,22 @@ def test_read_without_reader_rejected(store: RawStore) -> None:
         store.corrections(h, reader=object())  # type: ignore[arg-type]
     with pytest.raises(PermissionError):
         store.has(h, reader=object())  # type: ignore[arg-type]
+
+
+def test_reader_must_be_issued_by_that_store(tmp_path: Path) -> None:
+    from rawstore.store import _IssuedReader
+
+    s1 = RawStore(tmp_path / "rs1")
+    s2 = RawStore(tmp_path / "rs2")
+    try:
+        h = s1.put(b"guarded", _prov())
+        with pytest.raises(PermissionError):
+            s1.get(h, reader=_IssuedReader())
+        with pytest.raises(PermissionError):
+            s1.get(h, reader=s2._issue_reader())
+    finally:
+        s1.close()
+        s2.close()
 
 
 def test_naive_datetime_rejected(store: RawStore) -> None:
@@ -84,7 +97,7 @@ def test_corrects_must_be_sha256_hex(store: RawStore) -> None:
         store.put(b"x", _prov(), corrects="not-a-hash")
 
 
-def test_corrections_link_and_no_mutation(store: RawStore) -> None:
+def test_corrections_link_and_no_mutation(store: RawStore, reader: object) -> None:
     h_orig = store.put(b"original", _prov(source="vendor-A"))
     h_corr = store.put(
         b"corrected",
@@ -92,19 +105,19 @@ def test_corrections_link_and_no_mutation(store: RawStore) -> None:
         corrects=h_orig,
     )
     assert h_orig != h_corr
-    assert store.corrections(h_orig, reader=READER) == [h_corr]
+    assert store.corrections(h_orig, reader=reader) == [h_corr]
     # Reverse direction does not exist.
-    assert store.corrections(h_corr, reader=READER) == []
+    assert store.corrections(h_corr, reader=reader) == []
     # Original bytes survive unchanged.
-    assert store.get(h_orig, reader=READER) == b"original"
-    assert store.get(h_corr, reader=READER) == b"corrected"
+    assert store.get(h_orig, reader=reader) == b"original"
+    assert store.get(h_corr, reader=reader) == b"corrected"
 
 
-def test_multiple_corrections_to_same_original(store: RawStore) -> None:
+def test_multiple_corrections_to_same_original(store: RawStore, reader: object) -> None:
     h_orig = store.put(b"v0", _prov())
     h_c1 = store.put(b"v1", _prov(fetch=BASE_T + timedelta(hours=1)), corrects=h_orig)
     h_c2 = store.put(b"v2", _prov(fetch=BASE_T + timedelta(hours=2)), corrects=h_orig)
-    assert sorted(store.corrections(h_orig, reader=READER)) == sorted([h_c1, h_c2])
+    assert sorted(store.corrections(h_orig, reader=reader)) == sorted([h_c1, h_c2])
 
 
 def test_no_byte_file_rewrite_on_repeat_put(store: RawStore, tmp_path: Path) -> None:
@@ -132,12 +145,13 @@ def test_put_idempotent_on_repeat_hash(
     root = tmp_path_factory.mktemp("rs_idem")
     s = RawStore(root)
     try:
+        reader = s._issue_reader()
         hashes = {s.put(data, _prov()) for _ in range(repeats)}
         assert len(hashes) == 1
         h = next(iter(hashes))
-        assert s.get(h, reader=READER) == data
+        assert s.get(h, reader=reader) == data
         assert len(_files_under(s._bytes_root)) == 1
-        assert len(s.provenance(h, reader=READER)) == 1
+        assert len(s.provenance(h, reader=reader)) == 1
     finally:
         s.close()
 
@@ -165,6 +179,7 @@ def test_provenance_multiplicity(
     root = tmp_path_factory.mktemp("rs_mult")
     s = RawStore(root)
     try:
+        reader = s._issue_reader()
         h: str | None = None
         for i, src in enumerate(sources):
             returned = s.put(
@@ -179,7 +194,7 @@ def test_provenance_multiplicity(
             assert returned == h  # hash stable across vendors
         assert h is not None
         assert len(_files_under(s._bytes_root)) == 1
-        triples = s.provenance(h, reader=READER)
+        triples = s.provenance(h, reader=reader)
         assert len(triples) == len(sources)
         assert {t.source_id for t in triples} == set(sources)
     finally:
@@ -196,12 +211,13 @@ def test_exact_duplicate_provenance_dedup(
     root = tmp_path_factory.mktemp("rs_dedup")
     s = RawStore(root)
     try:
+        reader = s._issue_reader()
         p = _prov()
         h1 = s.put(data, p)
         h2 = s.put(data, p)
         h3 = s.put(data, p)
         assert h1 == h2 == h3
-        assert len(s.provenance(h1, reader=READER)) == 1
+        assert len(s.provenance(h1, reader=reader)) == 1
     finally:
         s.close()
 
@@ -227,7 +243,8 @@ def test_persists_across_reopen(tmp_path: Path) -> None:
 
     s2 = RawStore(root)
     try:
-        assert s2.get(h, reader=READER) == b"persist-me"
-        assert {p.source_id for p in s2.provenance(h, reader=READER)} == {"vendor-A", "vendor-B"}
+        reader = s2._issue_reader()
+        assert s2.get(h, reader=reader) == b"persist-me"
+        assert {p.source_id for p in s2.provenance(h, reader=reader)} == {"vendor-A", "vendor-B"}
     finally:
         s2.close()

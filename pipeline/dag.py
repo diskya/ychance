@@ -60,18 +60,29 @@ def _callable_signature(fn: Callable[..., Any]) -> str:
             raise ValueError("__pipeline_signature__ must be a non-empty string")
         return explicit
 
+    code = getattr(fn, "__code__", None)
+    if code is None:
+        # functools.partial, bound methods of C builtins, and other synthetic
+        # callables carry no bytecode. Falling back to qualname+source would
+        # collide between distinct partials (e.g. two partials over the same
+        # underlying function with different bound args share qualname and
+        # have no source), and the DAG signature is load-bearing for §6.1
+        # reproducibility. Force the caller to commit to an explicit id.
+        raise TypeError(
+            f"callable {fn!r} has no __code__; set a stable string attribute "
+            "'__pipeline_signature__' on it so DAG signatures do not collide."
+        )
+
     payload: dict[str, Any] = {
         "module": getattr(fn, "__module__", None),
         "qualname": getattr(fn, "__qualname__", type(fn).__qualname__),
-    }
-    code = getattr(fn, "__code__", None)
-    if code is not None:
-        payload["code"] = {
+        "code": {
             "bytecode": code.co_code.hex(),
             "consts": [_signature_value(value) for value in code.co_consts],
             "names": list(code.co_names),
             "varnames": list(code.co_varnames),
-        }
+        },
+    }
     closure = getattr(fn, "__closure__", None)
     if closure:
         payload["closure"] = [
@@ -202,6 +213,7 @@ class PipelineDAG:
         )
 
         results: dict[str, StageResult] = {}
+        stage_envelopes: dict[str, dict[str, Any]] = {}
         status = "success"
         error_info: Optional[dict] = None
         try:
@@ -219,6 +231,7 @@ class PipelineDAG:
                             "envelope binding must return a dict"
                         )
                     stage_envelope.update(extra_env)
+                stage_envelopes[node.stage.name] = stage_envelope
                 try:
                     res = node.stage.run(stage_inputs, envelope=stage_envelope)
                 except Exception as exc:
@@ -231,6 +244,9 @@ class PipelineDAG:
                     raise
                 results[node.stage.name] = res
         finally:
+            failed_stage = (
+                error_info["failed_stage"] if error_info is not None else None
+            )
             end_record: dict[str, Any] = {
                 "category": "Audit",
                 "stage": "Audit",
@@ -243,11 +259,29 @@ class PipelineDAG:
                 "stages": [
                     {
                         "name": n.stage.name,
-                        "cache_hit": results[n.stage.name].cache_hit,
-                        "output_hash": results[n.stage.name].output_hash,
+                        "status": (
+                            "cache_hit"
+                            if n.stage.name in results
+                            and results[n.stage.name].cache_hit
+                            else "success"
+                            if n.stage.name in results
+                            else "error"
+                            if n.stage.name == failed_stage
+                            else "not_started"
+                        ),
+                        "cache_hit": (
+                            results[n.stage.name].cache_hit
+                            if n.stage.name in results
+                            else None
+                        ),
+                        "output_hash": (
+                            results[n.stage.name].output_hash
+                            if n.stage.name in results
+                            else None
+                        ),
+                        "envelope": stage_envelopes.get(n.stage.name),
                     }
                     for n in self._nodes
-                    if n.stage.name in results
                 ],
             }
             if error_info is not None:

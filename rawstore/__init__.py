@@ -1,3 +1,3 @@
-from .store import AuthorizedReader, Provenance, RawStore
+from .store import Provenance, RawStore
 
-__all__ = ["AuthorizedReader", "Provenance", "RawStore"]
+__all__ = ["Provenance", "RawStore"]
