@@ -59,6 +59,16 @@ CREATE TABLE IF NOT EXISTS corrections (
 
 CREATE INDEX IF NOT EXISTS idx_corrections_original
     ON corrections(original_hash);
+
+CREATE TABLE IF NOT EXISTS llm_cache (
+    model_id TEXT NOT NULL,
+    prompt_hash TEXT NOT NULL,
+    params_hash TEXT NOT NULL,
+    bytes_hash TEXT NOT NULL,
+    first_written_utc TEXT NOT NULL,
+    PRIMARY KEY (model_id, prompt_hash, params_hash),
+    FOREIGN KEY (bytes_hash) REFERENCES blobs(hash)
+);
 """
 
 
@@ -135,48 +145,21 @@ class RawStore:
         (a prior sha256 hex digest), records that this new entry corrects that
         original; the original is not mutated.
         """
-        if not isinstance(data, (bytes, bytearray, memoryview)):
-            raise TypeError("data must be bytes-like")
-        data = bytes(data)
-
-        source_id, fetch_time, vendor_timestamp = provenance
-        if not isinstance(source_id, str) or not source_id:
-            raise ValueError("provenance.source_id must be a non-empty string")
-        fetch_iso = _to_utc_iso(fetch_time)
-        vendor_iso = _to_utc_iso(vendor_timestamp)
-
-        if corrects is not None:
-            if not isinstance(corrects, str) or len(corrects) != 64:
-                raise ValueError("corrects must be a sha256 hex digest")
-
-        h = hashlib.sha256(data).hexdigest()
+        data = _coerce_data(data)
+        fetch_iso, vendor_iso = _normalize_provenance(provenance)
+        if corrects is not None and (not isinstance(corrects, str) or len(corrects) != 64):
+            raise ValueError("corrects must be a sha256 hex digest")
 
         with self._lock:
             cur = self._conn.cursor()
             cur.execute("BEGIN IMMEDIATE")
             try:
-                row = cur.execute(
-                    "SELECT 1 FROM blobs WHERE hash = ?", (h,)
-                ).fetchone()
-                if row is None:
-                    now = datetime.now(timezone.utc)
-                    day_dir = self._bytes_root / now.date().isoformat() / h[:2]
-                    day_dir.mkdir(parents=True, exist_ok=True)
-                    blob_path = day_dir / h
-                    tmp_path = day_dir / (h + ".tmp")
-                    tmp_path.write_bytes(data)
-                    tmp_path.replace(blob_path)
-                    rel = blob_path.relative_to(self._bytes_root).as_posix()
-                    cur.execute(
-                        "INSERT INTO blobs(hash, bytes_path, bytes_size, first_seen_utc) "
-                        "VALUES (?, ?, ?, ?)",
-                        (h, rel, len(data), now.isoformat()),
-                    )
-                cur.execute(
-                    "INSERT OR IGNORE INTO provenance("
-                    "hash, source_id, fetch_time_utc, vendor_timestamp_utc) "
-                    "VALUES (?, ?, ?, ?)",
-                    (h, source_id, fetch_iso, vendor_iso),
+                h = self._put_rows(
+                    cur,
+                    data=data,
+                    provenance=provenance,
+                    fetch_iso=fetch_iso,
+                    vendor_iso=vendor_iso,
                 )
                 if corrects is not None:
                     cur.execute(
@@ -189,6 +172,43 @@ class RawStore:
                 cur.execute("ROLLBACK")
                 raise
 
+        return h
+
+    def _put_llm_response(
+        self,
+        data: bytes,
+        provenance: Provenance,
+        *,
+        reader: object,
+        model_id: str,
+        prompt_hash: str,
+        params_hash: str,
+    ) -> str:
+        self._require_reader(reader)
+        data = _coerce_data(data)
+        fetch_iso, vendor_iso = _normalize_provenance(provenance)
+        _validate_llm_key(model_id=model_id, prompt_hash=prompt_hash, params_hash=params_hash)
+        with self._lock:
+            cur = self._conn.cursor()
+            cur.execute("BEGIN IMMEDIATE")
+            try:
+                h = self._put_rows(
+                    cur,
+                    data=data,
+                    provenance=provenance,
+                    fetch_iso=fetch_iso,
+                    vendor_iso=vendor_iso,
+                )
+                cur.execute(
+                    "INSERT OR IGNORE INTO llm_cache("
+                    "model_id, prompt_hash, params_hash, bytes_hash, first_written_utc) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (model_id, prompt_hash, params_hash, h, fetch_iso),
+                )
+                cur.execute("COMMIT")
+            except Exception:
+                cur.execute("ROLLBACK")
+                raise
         return h
 
     def get(self, hash: str, *, reader: object) -> bytes:
@@ -232,3 +252,102 @@ class RawStore:
                 "SELECT 1 FROM blobs WHERE hash = ?", (hash,)
             ).fetchone()
         return row is not None
+
+    def _lookup_llm(
+        self,
+        reader: object,
+        *,
+        model_id: str,
+        prompt_hash: str,
+        params_hash: str,
+    ) -> str | None:
+        self._require_reader(reader)
+        _validate_llm_key(model_id=model_id, prompt_hash=prompt_hash, params_hash=params_hash)
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT bytes_hash FROM llm_cache "
+                "WHERE model_id = ? AND prompt_hash = ? AND params_hash = ?",
+                (model_id, prompt_hash, params_hash),
+            ).fetchone()
+        return None if row is None else row[0]
+
+    def _insert_llm_cache(
+        self,
+        reader: object,
+        *,
+        model_id: str,
+        prompt_hash: str,
+        params_hash: str,
+        bytes_hash: str,
+    ) -> None:
+        self._require_reader(reader)
+        _validate_llm_key(model_id=model_id, prompt_hash=prompt_hash, params_hash=params_hash)
+        if not isinstance(bytes_hash, str) or len(bytes_hash) != 64:
+            raise ValueError("bytes_hash must be a sha256 hex digest")
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR IGNORE INTO llm_cache("
+                "model_id, prompt_hash, params_hash, bytes_hash, first_written_utc) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (model_id, prompt_hash, params_hash, bytes_hash, now),
+            )
+
+    def _put_rows(
+        self,
+        cur: sqlite3.Cursor,
+        *,
+        data: bytes,
+        provenance: Provenance,
+        fetch_iso: str,
+        vendor_iso: str,
+    ) -> str:
+        source_id = provenance.source_id
+        h = hashlib.sha256(data).hexdigest()
+        row = cur.execute(
+            "SELECT 1 FROM blobs WHERE hash = ?", (h,)
+        ).fetchone()
+        if row is None:
+            now = datetime.now(timezone.utc)
+            day_dir = self._bytes_root / now.date().isoformat() / h[:2]
+            day_dir.mkdir(parents=True, exist_ok=True)
+            blob_path = day_dir / h
+            tmp_path = day_dir / (h + ".tmp")
+            tmp_path.write_bytes(data)
+            tmp_path.replace(blob_path)
+            rel = blob_path.relative_to(self._bytes_root).as_posix()
+            cur.execute(
+                "INSERT INTO blobs(hash, bytes_path, bytes_size, first_seen_utc) "
+                "VALUES (?, ?, ?, ?)",
+                (h, rel, len(data), now.isoformat()),
+            )
+        cur.execute(
+            "INSERT OR IGNORE INTO provenance("
+            "hash, source_id, fetch_time_utc, vendor_timestamp_utc) "
+            "VALUES (?, ?, ?, ?)",
+            (h, source_id, fetch_iso, vendor_iso),
+        )
+        return h
+
+
+def _coerce_data(data: bytes) -> bytes:
+    if not isinstance(data, (bytes, bytearray, memoryview)):
+        raise TypeError("data must be bytes-like")
+    return bytes(data)
+
+
+def _normalize_provenance(provenance: Provenance) -> tuple[str, str]:
+    source_id, fetch_time, vendor_timestamp = provenance
+    if not isinstance(source_id, str) or not source_id:
+        raise ValueError("provenance.source_id must be a non-empty string")
+    fetch_iso = _to_utc_iso(fetch_time)
+    vendor_iso = _to_utc_iso(vendor_timestamp)
+    return fetch_iso, vendor_iso
+
+
+def _validate_llm_key(*, model_id: str, prompt_hash: str, params_hash: str) -> None:
+    if not isinstance(model_id, str) or not model_id:
+        raise ValueError("model_id must be a non-empty string")
+    for label, value in (("prompt_hash", prompt_hash), ("params_hash", params_hash)):
+        if not isinstance(value, str) or len(value) != 64:
+            raise ValueError(f"{label} must be a sha256 hex digest")

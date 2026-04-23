@@ -52,6 +52,7 @@ class AccessLayer:
     get: Callable[[str, datetime], bytes]
     provenance: Callable[[str, datetime], list[Provenance]]
     corrections: Callable[[str, datetime], list[str]]
+    lookup_llm: Callable[[str, str, str, datetime], str | None]
 
     def __init__(
         self,
@@ -160,11 +161,39 @@ class AccessLayer:
             )
             return visible
 
+        def lookup_llm(
+            model_id: str,
+            prompt_hash: str,
+            params_hash: str,
+            query_time: datetime,
+        ) -> str | None:
+            qt = _ensure_utc(query_time)
+            self._enforce_budget(hash=prompt_hash, qt=qt, kind="llm_cache")
+            bytes_hash = store._lookup_llm(
+                reader,
+                model_id=model_id,
+                prompt_hash=prompt_hash,
+                params_hash=params_hash,
+            )
+            self._count += 1
+            self._log_read(
+                prompt_hash,
+                qt,
+                kind="llm_cache",
+                outcome="hit" if bytes_hash is not None else "miss",
+                model_id=model_id,
+                prompt_hash=prompt_hash,
+                params_hash=params_hash,
+                bytes_hash=bytes_hash,
+            )
+            return bytes_hash
+
         # Keep the store handle and its reader capability out of AccessLayer
         # attributes. Normal callers only see the audited/budgeted surface.
         self.get = get
         self.provenance = provenance
         self.corrections = corrections
+        self.lookup_llm = lookup_llm
 
     # --- cycle control ---------------------------------------------------
 

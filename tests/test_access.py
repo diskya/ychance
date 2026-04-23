@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -10,9 +12,10 @@ from hypothesis import given, settings, strategies as st
 from access import (
     AccessLayer,
     RateLimitExceeded,
+    RawStoreWriter,
     TemporalAdmissibilityError,
 )
-from audit import AuditLog
+from audit import AuditLog, canonicalize
 from rawstore import Provenance, RawStore
 
 
@@ -49,6 +52,14 @@ def _audit_records(log: AuditLog) -> list[dict]:
     return records
 
 
+def _prompt_hash(prompt: str) -> str:
+    return hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+
+
+def _params_hash(model: str, params: dict) -> str:
+    return hashlib.sha256(canonicalize({"model": model, "params": params})).hexdigest()
+
+
 # --- construction ----------------------------------------------------------
 
 def test_access_does_not_expose_rawstore_reader_capability(stack):
@@ -66,6 +77,122 @@ def test_access_hides_store_bound_reader_from_attribute_lookup(stack):
         _ = access._AccessLayer__store
     with pytest.raises(AttributeError):
         _ = access._AccessLayer__reader
+
+
+def test_rawstore_writer_put_llm_response_returns_hash_and_indexes(tmp_path: Path) -> None:
+    store = RawStore(tmp_path / "rs")
+    log = AuditLog(tmp_path / "audit")
+    writer = RawStoreWriter(store, log)
+    model = "qwen-plus"
+    p_hash = _prompt_hash("fixed prompt")
+    par_hash = _params_hash(model, {"temperature": 0, "max_tokens": 16})
+    body = canonicalize(
+        {
+            "model": model,
+            "prompt_hash": p_hash,
+            "params_hash": par_hash,
+            "response": {"text": "hello", "input_tokens": 1, "output_tokens": 2},
+        }
+    )
+    try:
+        bytes_hash = writer.put_llm_response(
+            body=body,
+            model_id=model,
+            prompt_hash=p_hash,
+            params_hash=par_hash,
+            fetch_time=BASE_T,
+        )
+        reader = store._issue_reader()
+
+        assert bytes_hash == hashlib.sha256(body).hexdigest()
+        assert store.get(bytes_hash, reader=reader) == body
+        assert (
+            store._lookup_llm(
+                reader,
+                model_id=model,
+                prompt_hash=p_hash,
+                params_hash=par_hash,
+            )
+            == bytes_hash
+        )
+        records = _audit_records(log)
+        assert [r["category"] for r in records] == ["LLMWrite"]
+        assert records[0]["bytes_hash"] == bytes_hash
+    finally:
+        store.close()
+
+
+def test_llm_cache_lookup_hit_still_requires_admissible_bytes(stack) -> None:
+    store, _, access = stack
+    model = "qwen-plus"
+    p_hash = _prompt_hash("future prompt")
+    par_hash = _params_hash(model, {"temperature": 0})
+    future = BASE_T + timedelta(hours=1)
+    body = canonicalize(
+        {
+            "model": model,
+            "prompt_hash": p_hash,
+            "params_hash": par_hash,
+            "response": {"text": "hello", "input_tokens": 1, "output_tokens": 1},
+        }
+    )
+    bytes_hash = store.put(body, Provenance(f"llm:{model}", future, future))
+    reader = store._issue_reader()
+    store._insert_llm_cache(
+        reader,
+        model_id=model,
+        prompt_hash=p_hash,
+        params_hash=par_hash,
+        bytes_hash=bytes_hash,
+    )
+
+    assert access.lookup_llm(model, p_hash, par_hash, BASE_T) == bytes_hash
+    with pytest.raises(TemporalAdmissibilityError):
+        access.get(bytes_hash, BASE_T)
+
+
+def test_llm_cache_schema_is_created_on_reopen(tmp_path: Path) -> None:
+    root = tmp_path / "rs"
+    store = RawStore(root)
+    store.put(b"preexisting", _prov())
+    store.close()
+    with sqlite3.connect(root / "index.sqlite") as conn:
+        conn.execute("DROP TABLE llm_cache")
+
+    store = RawStore(root)
+    log = AuditLog(tmp_path / "audit")
+    writer = RawStoreWriter(store, log)
+    model = "qwen-plus"
+    p_hash = _prompt_hash("schema prompt")
+    par_hash = _params_hash(model, {"temperature": 0})
+    body = canonicalize(
+        {
+            "model": model,
+            "prompt_hash": p_hash,
+            "params_hash": par_hash,
+            "response": {"text": "hello", "input_tokens": 1, "output_tokens": 1},
+        }
+    )
+    try:
+        bytes_hash = writer.put_llm_response(
+            body=body,
+            model_id=model,
+            prompt_hash=p_hash,
+            params_hash=par_hash,
+            fetch_time=BASE_T,
+        )
+        reader = store._issue_reader()
+        assert (
+            store._lookup_llm(
+                reader,
+                model_id=model,
+                prompt_hash=p_hash,
+                params_hash=par_hash,
+            )
+            == bytes_hash
+        )
+    finally:
+        store.close()
 
 
 @pytest.mark.parametrize(
@@ -234,6 +361,65 @@ def test_rate_limit_counts_all_read_kinds(tmp_path: Path):
             access.provenance(h, BASE_T)
     finally:
         store.close()
+
+
+def test_llm_cache_lookup_counts_budget_and_audits_hit_and_miss(stack):
+    store, log, access = stack
+    model = "qwen-plus"
+    p_hash = "a" * 64
+    par_hash = "b" * 64
+    body = canonicalize(
+        {
+            "model": model,
+            "prompt_hash": p_hash,
+            "params_hash": par_hash,
+            "response": {"text": "ok", "input_tokens": 1, "output_tokens": 1},
+        }
+    )
+    bytes_hash = store.put(body, _prov(source=f"llm:{model}"))
+    reader = store._issue_reader()
+    store._insert_llm_cache(
+        reader,
+        model_id=model,
+        prompt_hash=p_hash,
+        params_hash=par_hash,
+        bytes_hash=bytes_hash,
+    )
+
+    assert access.lookup_llm(model, p_hash, par_hash, BASE_T) == bytes_hash
+    assert access.lookup_llm(model, "c" * 64, par_hash, BASE_T) is None
+    assert access.reads_used == 2
+    records = [r for r in _audit_records(log) if r["kind"] == "llm_cache"]
+    assert [r["outcome"] for r in records] == ["hit", "miss"]
+
+
+def test_llm_cache_lookup_can_hit_before_temporal_read_is_admissible(stack):
+    store, _, access = stack
+    model = "qwen-plus"
+    p_hash = "d" * 64
+    par_hash = "e" * 64
+    future = BASE_T + timedelta(hours=1)
+    body = canonicalize(
+        {
+            "model": model,
+            "prompt_hash": p_hash,
+            "params_hash": par_hash,
+            "response": {"text": "future", "input_tokens": 1, "output_tokens": 1},
+        }
+    )
+    bytes_hash = store.put(body, _prov(source=f"llm:{model}", fetch=future, vendor=future))
+    reader = store._issue_reader()
+    store._insert_llm_cache(
+        reader,
+        model_id=model,
+        prompt_hash=p_hash,
+        params_hash=par_hash,
+        bytes_hash=bytes_hash,
+    )
+
+    assert access.lookup_llm(model, p_hash, par_hash, BASE_T) == bytes_hash
+    with pytest.raises(TemporalAdmissibilityError):
+        access.get(bytes_hash, BASE_T)
 
 
 def test_failed_reads_do_not_advance_counter(tmp_path: Path):

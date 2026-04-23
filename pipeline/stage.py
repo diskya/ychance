@@ -34,7 +34,7 @@ import types
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Optional, Union, get_args, get_origin, get_type_hints
 
-from access import AccessLayer
+from access import AccessLayer, RawStoreWriter
 from audit import AuditLog, canonicalize
 
 from .artifacts import ArtifactStore
@@ -136,6 +136,8 @@ class StageContext:
 
     ceiling: CostCeiling
     access: Optional[AccessLayer] = None
+    writer: Optional[RawStoreWriter] = None
+    envelope: dict[str, Any] = field(default_factory=dict)
     usage: CostUsage = field(default_factory=CostUsage)
 
     def charge_compute(self, usd: float) -> None:
@@ -206,6 +208,7 @@ class Stage:
         artifacts: ArtifactStore,
         audit: AuditLog,
         access: Optional[AccessLayer] = None,
+        writer: Optional[RawStoreWriter] = None,
     ) -> None:
         if not isinstance(artifacts, ArtifactStore):
             raise TypeError("artifacts must be an ArtifactStore")
@@ -213,6 +216,8 @@ class Stage:
             raise TypeError("audit must be an AuditLog")
         if access is not None and not isinstance(access, AccessLayer):
             raise TypeError("access must be an AccessLayer or None")
+        if writer is not None and not isinstance(writer, RawStoreWriter):
+            raise TypeError("writer must be a RawStoreWriter or None")
         if not isinstance(self.name, str) or not self.name:
             raise ValueError(
                 f"{type(self).__name__}: class attr 'name' must be a non-empty str"
@@ -239,6 +244,7 @@ class Stage:
         self._artifacts = artifacts
         self._audit = audit
         self._access = access
+        self._writer = writer
 
     # --- overridable hooks ------------------------------------------------
 
@@ -322,7 +328,12 @@ class Stage:
                 # records except the DAG-level start/end markers.
                 return StageResult(outputs, cached, True, CostUsage())
 
-        ctx = StageContext(ceiling=self.cost_ceiling, access=self._access)
+        ctx = StageContext(
+            ceiling=self.cost_ceiling,
+            access=self._access,
+            writer=self._writer,
+            envelope=env,
+        )
         outputs = self.compute(inputs, ctx)
         if self.OutputType is not type(None) and not isinstance(outputs, self.OutputType):
             raise TypeError(

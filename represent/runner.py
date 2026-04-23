@@ -3,13 +3,16 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 import numpy as np
 
+from access import utc_now
 from pipeline import CostCeiling, InvariantViolation, Stage, StageContext
 
+from .llm_client import LLMClient
 from .ops import DEFAULT_OPS, PrimitiveOp
+from .pricing import realized_usd
 from .registry import SpecRegistry
 from .spec import Spec, SpecValidationError
 
@@ -51,12 +54,28 @@ class RepresentOutput:
     cost_used: RepresentCostUsed
 
 
+@dataclass(frozen=True)
+class LLMCallTrace:
+    model: str
+    prompt_hash: str
+    params_hash: str
+    bytes_hash: str
+    declared_cost_usd: float
+    cost_tolerance: float
+    input_tokens: int
+    output_tokens: int
+
+
 @dataclass
 class _ExecutionContext:
     stage_ctx: StageContext
     query_time: datetime
     allowed_hashes: frozenset[str]
     read_hashes: set[str]
+    llm_client: LLMClient | None
+    fetch_time_provider: Callable[[], datetime]
+    llm_calls: dict[str, LLMCallTrace]
+    current_node_id: str | None = None
 
     @property
     def access(self) -> Any:
@@ -74,12 +93,102 @@ class _ExecutionContext:
         self.read_hashes.add(hash_value)
         return payload
 
+    def set_current_node(self, node_id: str) -> None:
+        self.current_node_id = node_id
+
+    def lookup_llm(self, model_id: str, prompt_hash: str, params_hash: str) -> str | None:
+        if self.stage_ctx.access is None:
+            raise RuntimeError("RepresentStage requires an AccessLayer")
+        self.stage_ctx.charge_data_read(1)
+        return self.stage_ctx.access.lookup_llm(
+            model_id,
+            prompt_hash,
+            params_hash,
+            self.query_time,
+        )
+
+    def read_llm_response(
+        self,
+        bytes_hash: str,
+        *,
+        model_id: str,
+        prompt_hash: str,
+        params_hash: str,
+    ) -> dict[str, Any]:
+        if self.stage_ctx.access is None:
+            raise RuntimeError("RepresentStage requires an AccessLayer")
+        self.stage_ctx.charge_data_read(1)
+        payload = self.stage_ctx.access.get(bytes_hash, query_time=self.query_time)
+        self.read_hashes.add(bytes_hash)
+        envelope = json.loads(payload.decode("utf-8"))
+        if envelope.get("model") != model_id:
+            raise ValueError("cached llm response model mismatch")
+        if envelope.get("prompt_hash") != prompt_hash:
+            raise ValueError("cached llm response prompt_hash mismatch")
+        if envelope.get("params_hash") != params_hash:
+            raise ValueError("cached llm response params_hash mismatch")
+        response = envelope.get("response")
+        if not isinstance(response, dict):
+            raise ValueError("cached llm response must contain a response object")
+        return response
+
+    def complete_llm(self, *, model: str, prompt: str, params: dict[str, Any]) -> Any:
+        if self.llm_client is None:
+            raise RuntimeError("RepresentStage requires an llm_client for llm_call cache misses")
+        return self.llm_client.complete(model=model, prompt=prompt, params=params)
+
+    def write_llm_response(
+        self,
+        *,
+        body: bytes,
+        model_id: str,
+        prompt_hash: str,
+        params_hash: str,
+    ) -> str:
+        if self.stage_ctx.writer is None:
+            raise RuntimeError("RepresentStage requires a writer for llm_call nodes")
+        bytes_hash = self.stage_ctx.writer.put_llm_response(
+            body=body,
+            model_id=model_id,
+            prompt_hash=prompt_hash,
+            params_hash=params_hash,
+            fetch_time=self.fetch_time_provider(),
+        )
+        self.stage_ctx.charge_data_read(1)
+        self.read_hashes.add(bytes_hash)
+        return bytes_hash
+
+    def record_llm_call(
+        self,
+        *,
+        model: str,
+        prompt_hash: str,
+        params_hash: str,
+        bytes_hash: str,
+        declared_cost_usd: float,
+        cost_tolerance: float,
+        input_tokens: int,
+        output_tokens: int,
+    ) -> None:
+        if self.current_node_id is None:
+            raise RuntimeError("llm_call ran without a current node id")
+        self.llm_calls[self.current_node_id] = LLMCallTrace(
+            model=model,
+            prompt_hash=prompt_hash,
+            params_hash=params_hash,
+            bytes_hash=bytes_hash,
+            declared_cost_usd=declared_cost_usd,
+            cost_tolerance=cost_tolerance,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+        )
+
 
 class RepresentStage(Stage):
     name = "represent_runner"
     version = "1"
     audit_stage = "Represent"
-    cost_ceiling = CostCeiling(compute_usd=1.0, data_reads=1024)
+    cost_ceiling = CostCeiling(compute_usd=1.0, llm_usd=1.0, data_reads=1024)
     InputType = RepresentInput
     OutputType = RepresentOutput
 
@@ -90,23 +199,36 @@ class RepresentStage(Stage):
         artifacts,
         audit,
         access,
+        writer=None,
+        llm_client: LLMClient | None = None,
+        fetch_time_provider: Callable[[], datetime] = utc_now,
         op_registry: Mapping[str, PrimitiveOp] | None = None,
     ) -> None:
         if not isinstance(registry, SpecRegistry):
             raise TypeError("registry must be a SpecRegistry")
-        super().__init__(artifacts=artifacts, audit=audit, access=access)
+        super().__init__(artifacts=artifacts, audit=audit, access=access, writer=writer)
         self._registry = registry
         self._ops = dict(op_registry or DEFAULT_OPS)
+        self._llm_client = llm_client
+        self._fetch_time_provider = fetch_time_provider
 
     def compute(self, inputs: RepresentInput, ctx: StageContext) -> RepresentOutput:
         spec = self._registry.get(inputs.spec_version)
         self._validate_declared_deps(spec)
+        if _has_llm_call(spec):
+            if ctx.writer is None:
+                raise RuntimeError("RepresentStage requires a writer for llm_call nodes")
+            if ctx.access is None:
+                raise RuntimeError("RepresentStage requires an AccessLayer")
         query_time = _parse_query_time(inputs.query_time)
         exec_ctx = _ExecutionContext(
             stage_ctx=ctx,
             query_time=query_time,
             allowed_hashes=frozenset(spec.deps),
             read_hashes=set(),
+            llm_client=self._llm_client,
+            fetch_time_provider=self._fetch_time_provider,
+            llm_calls={},
         )
 
         node_values: dict[str, Any] = {}
@@ -122,7 +244,15 @@ class RepresentStage(Stage):
                 )
             ctx.charge_compute(COMPUTE_COST_PER_NODE_USD)
             input_values = [node_values[input_id] for input_id in node.inputs]
+            exec_ctx.set_current_node(node_id)
             node_values[node_id] = op.run(node.args, input_values, exec_ctx)
+            if node.op == "llm_call":
+                self._handle_llm_cost(
+                    spec=spec,
+                    node_id=node_id,
+                    trace=exec_ctx.llm_calls[node_id],
+                    ctx=ctx,
+                )
 
         tensor = _as_output_tensor(node_values[spec.output])
         cost_used = RepresentCostUsed(
@@ -143,8 +273,6 @@ class RepresentStage(Stage):
         if outputs.spec_version != spec.spec_id:
             raise InvariantViolation("output spec_version does not match the registered spec")
         self._validate_declared_deps(spec)
-        if not set(outputs.input_hashes).issubset(set(spec.deps)):
-            raise InvariantViolation("recorded input hashes must be a subset of spec.deps")
         expected_dtype = np.dtype(spec.output_schema.dtype)
         actual_dtype = np.dtype(outputs.tensor.dtype)
         if actual_dtype != expected_dtype:
@@ -227,6 +355,39 @@ class RepresentStage(Stage):
                     f"spec {spec.spec_id}: raw_get hash {hash_value} is outside deps"
                 )
 
+    def _handle_llm_cost(
+        self,
+        *,
+        spec: Spec,
+        node_id: str,
+        trace: LLMCallTrace,
+        ctx: StageContext,
+    ) -> None:
+        realized = realized_usd(
+            model=trace.model,
+            input_tokens=trace.input_tokens,
+            output_tokens=trace.output_tokens,
+        )
+        ctx.charge_llm(realized)
+        drift_ratio = realized / trace.declared_cost_usd
+        if drift_ratio <= 1.0 + trace.cost_tolerance:
+            return
+        self._audit.append(
+            {
+                "category": "CostDrift",
+                "stage": "Represent",
+                "envelope": dict(ctx.envelope),
+                "spec_version": spec.spec_id,
+                "node_id": node_id,
+                "model": trace.model,
+                "declared_usd": trace.declared_cost_usd,
+                "realized_usd": realized,
+                "drift_ratio": drift_ratio,
+                "prompt_hash": trace.prompt_hash,
+                "params_hash": trace.params_hash,
+            }
+        )
+
 
 def _parse_query_time(value: str) -> datetime:
     if not isinstance(value, str) or not value:
@@ -235,6 +396,10 @@ def _parse_query_time(value: str) -> datetime:
     if query_time.tzinfo is None:
         raise ValueError("query_time must be timezone-aware")
     return query_time
+
+
+def _has_llm_call(spec: Spec) -> bool:
+    return any(node.op == "llm_call" for node in spec.nodes)
 
 
 def _as_output_tensor(value: Any) -> np.ndarray:

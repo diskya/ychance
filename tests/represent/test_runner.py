@@ -8,17 +8,20 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from access import AccessLayer
-from audit import AuditLog
+from access import AccessLayer, RawStoreWriter
+from audit import AuditLog, canonicalize
 from pipeline import ArtifactStore, CostCeiling, CostCeilingExceeded, PipelineDAG
 from rawstore import Provenance, RawStore
 from represent import (
     DependencyEnvelopeError,
+    LLMResponse,
     RepresentInput,
     RepresentStage,
     SpecRegistry,
+    StubLLMClient,
     finalize_spec,
 )
+from represent.llm_client import params_hash, prompt_hash
 
 
 BASE_TIME = datetime(2026, 4, 23, 12, 0, 0, tzinfo=timezone.utc)
@@ -41,6 +44,11 @@ def rawstore(tmp_path: Path):
 @pytest.fixture
 def access(rawstore: RawStore, audit: AuditLog) -> AccessLayer:
     return AccessLayer(rawstore, audit, cycle_id="c1", max_reads_per_cycle=100)
+
+
+@pytest.fixture
+def writer(rawstore: RawStore, audit: AuditLog) -> RawStoreWriter:
+    return RawStoreWriter(rawstore, audit)
 
 
 @pytest.fixture
@@ -119,18 +127,185 @@ def _scalar_body(raw_hash: str, *, deps: list[str] | None = None, name: str = "t
     }
 
 
+def _llm_args(
+    *,
+    declared_cost_usd: float = 0.001,
+    cost_tolerance: float = 0.20,
+    prompt_template: str = "fixed prompt",
+    input_names: list[str] | None = None,
+) -> dict:
+    args = {
+        "model": "qwen-plus",
+        "prompt_template": prompt_template,
+        "params": {"temperature": 0, "max_tokens": 16},
+        "input_names": [] if input_names is None else list(input_names),
+        "declared_cost_usd": declared_cost_usd,
+        "cost_tolerance": cost_tolerance,
+    }
+    return args
+
+
+def _llm_text_body(args: dict | None = None) -> dict:
+    return {
+        "schema_version": 1,
+        "name": "llm_text",
+        "graph": {
+            "nodes": [
+                {
+                    "id": "call",
+                    "op": "llm_call",
+                    "args": _llm_args() if args is None else dict(args),
+                    "inputs": [],
+                },
+            ],
+            "output": "call",
+        },
+        "deps": [],
+        "cost": {
+            "compute_usd": 0.0001,
+            "llm_usd": 0.001,
+            "storage_bytes": 16,
+        },
+        "output_schema": {
+            "dtype": "<U5",
+            "shape": [],
+        },
+    }
+
+
+def _mixed_raw_llm_body(raw_hash: str, args: dict | None = None) -> dict:
+    return {
+        "schema_version": 1,
+        "name": "mixed_raw_llm",
+        "graph": {
+            "nodes": [
+                {
+                    "id": "read",
+                    "op": "raw_get",
+                    "args": {"hash": raw_hash},
+                    "inputs": [],
+                },
+                {
+                    "id": "raw_json",
+                    "op": "decode_json",
+                    "args": {},
+                    "inputs": ["read"],
+                },
+                {
+                    "id": "raw_value",
+                    "op": "json_get",
+                    "args": {"path": ["value"]},
+                    "inputs": ["raw_json"],
+                },
+                {
+                    "id": "call",
+                    "op": "llm_call",
+                    "args": _llm_args(prompt_template="value is {value}", input_names=["value"])
+                    if args is None
+                    else dict(args),
+                    "inputs": ["raw_value"],
+                },
+                {
+                    "id": "parsed",
+                    "op": "decode_json",
+                    "args": {},
+                    "inputs": ["call"],
+                },
+                {
+                    "id": "picked",
+                    "op": "json_get",
+                    "args": {"path": ["score"]},
+                    "inputs": ["parsed"],
+                },
+                {
+                    "id": "cast",
+                    "op": "cast_float64",
+                    "args": {},
+                    "inputs": ["picked"],
+                },
+            ],
+            "output": "cast",
+        },
+        "deps": [raw_hash],
+        "cost": {
+            "compute_usd": 0.0001,
+            "llm_usd": 0.001,
+            "storage_bytes": 8,
+        },
+        "output_schema": {
+            "dtype": "float64",
+            "shape": [],
+        },
+    }
+
+
+def _llm_key(args: dict, prompt: str) -> tuple[str, str, str]:
+    return (
+        args["model"],
+        prompt_hash(prompt),
+        params_hash(model=args["model"], params=args["params"]),
+    )
+
+
+def _seed_llm_cache(
+    rawstore: RawStore,
+    *,
+    model: str,
+    prompt_hash_value: str,
+    params_hash_value: str,
+    text: str,
+    input_tokens: int,
+    output_tokens: int,
+    fetch_time: datetime = BASE_TIME - timedelta(minutes=1),
+) -> str:
+    body = canonicalize(
+        {
+            "model": model,
+            "prompt_hash": prompt_hash_value,
+            "params_hash": params_hash_value,
+            "response": {
+                "text": text,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+            },
+        }
+    )
+    bytes_hash = rawstore.put(
+        body,
+        Provenance(
+            f"llm:{model}",
+            fetch_time,
+            fetch_time,
+        ),
+    )
+    reader = rawstore._issue_reader()
+    rawstore._insert_llm_cache(
+        reader,
+        model_id=model,
+        prompt_hash=prompt_hash_value,
+        params_hash=params_hash_value,
+        bytes_hash=bytes_hash,
+    )
+    return bytes_hash
+
+
 def _runner(
     *,
     registry: SpecRegistry,
     artifacts: ArtifactStore,
     audit: AuditLog,
     access: AccessLayer,
+    writer: RawStoreWriter | None = None,
+    llm_client=None,
 ) -> RepresentStage:
     return RepresentStage(
         registry=registry,
         artifacts=artifacts,
         audit=audit,
         access=access,
+        writer=writer,
+        llm_client=llm_client,
+        fetch_time_provider=lambda: BASE_TIME,
     )
 
 
@@ -176,6 +351,249 @@ def test_programmatic_spec_emission_runs_and_is_byte_identical(
     finally:
         artifacts_one.close()
         artifacts_two.close()
+
+
+def test_llm_call_miss_then_hit_uses_cache_and_keeps_input_hashes(
+    tmp_path: Path,
+    rawstore: RawStore,
+    audit: AuditLog,
+    access: AccessLayer,
+    writer: RawStoreWriter,
+) -> None:
+    args = _llm_args()
+    response = LLMResponse(
+        text="hello",
+        input_tokens=10,
+        output_tokens=5,
+        raw_json={},
+    )
+    registry = SpecRegistry()
+    spec_version = registry.register(finalize_spec(_llm_text_body(args)))
+
+    artifacts_one = ArtifactStore(tmp_path / "artifacts-llm-one")
+    artifacts_two = ArtifactStore(tmp_path / "artifacts-llm-two")
+    try:
+        stage_one = _runner(
+            registry=registry,
+            artifacts=artifacts_one,
+            audit=audit,
+            access=access,
+            writer=writer,
+            llm_client=StubLLMClient({_llm_key(args, "fixed prompt"): response}),
+        )
+        first = stage_one.run(
+            RepresentInput(spec_version=spec_version, query_time=BASE_TIME.isoformat())
+        )
+
+        stage_two = _runner(
+            registry=registry,
+            artifacts=artifacts_two,
+            audit=audit,
+            access=access,
+            writer=writer,
+            llm_client=StubLLMClient({}),
+        )
+        second = stage_two.run(
+            RepresentInput(spec_version=spec_version, query_time=BASE_TIME.isoformat())
+        )
+
+        assert first.outputs.tensor.item() == "hello"
+        assert second.outputs.tensor.item() == "hello"
+        assert first.outputs.tensor.tobytes() == second.outputs.tensor.tobytes()
+        assert first.outputs.input_hashes == second.outputs.input_hashes
+        assert first.output_hash == second.output_hash
+        assert len(first.outputs.input_hashes) == 1
+    finally:
+        artifacts_one.close()
+        artifacts_two.close()
+
+
+def test_mixed_raw_get_and_llm_call_replays_same_tensor_bytes(
+    tmp_path: Path,
+    rawstore: RawStore,
+    audit: AuditLog,
+    access: AccessLayer,
+    writer: RawStoreWriter,
+) -> None:
+    raw_hash = _put_json(rawstore, {"value": 3.5})
+    body = _mixed_raw_llm_body(raw_hash)
+    args = body["graph"]["nodes"][3]["args"]
+    response = LLMResponse(
+        text='{"score": 8.25}',
+        input_tokens=20,
+        output_tokens=10,
+        raw_json={},
+    )
+    registry = SpecRegistry()
+    spec_version = registry.register(finalize_spec(body))
+
+    artifacts_one = ArtifactStore(tmp_path / "artifacts-mixed-one")
+    artifacts_two = ArtifactStore(tmp_path / "artifacts-mixed-two")
+    try:
+        first = _runner(
+            registry=registry,
+            artifacts=artifacts_one,
+            audit=audit,
+            access=access,
+            writer=writer,
+            llm_client=StubLLMClient({_llm_key(args, "value is 3.5"): response}),
+        ).run(RepresentInput(spec_version=spec_version, query_time=BASE_TIME.isoformat()))
+
+        second = _runner(
+            registry=registry,
+            artifacts=artifacts_two,
+            audit=audit,
+            access=access,
+            writer=writer,
+            llm_client=StubLLMClient({}),
+        ).run(RepresentInput(spec_version=spec_version, query_time=BASE_TIME.isoformat()))
+
+        assert first.outputs.tensor.item() == pytest.approx(8.25)
+        assert first.outputs.tensor.tobytes() == second.outputs.tensor.tobytes()
+        assert first.output_hash == second.output_hash
+        assert set(first.outputs.input_hashes) == set(second.outputs.input_hashes)
+        assert raw_hash in first.outputs.input_hashes
+        assert len(first.outputs.input_hashes) == 2
+    finally:
+        artifacts_one.close()
+        artifacts_two.close()
+
+
+def test_llm_cache_hash_is_not_required_in_deps_but_raw_get_still_is(
+    rawstore: RawStore,
+    artifacts: ArtifactStore,
+    audit: AuditLog,
+    access: AccessLayer,
+    writer: RawStoreWriter,
+) -> None:
+    raw_hash = _put_json(rawstore, {"value": 4.0})
+    body = _mixed_raw_llm_body(raw_hash)
+    args = body["graph"]["nodes"][3]["args"]
+    response = LLMResponse(text='{"score": 6.0}', input_tokens=10, output_tokens=4, raw_json={})
+    registry = SpecRegistry()
+    spec_version = registry.register(finalize_spec(body))
+    result = _runner(
+        registry=registry,
+        artifacts=artifacts,
+        audit=audit,
+        access=access,
+        writer=writer,
+        llm_client=StubLLMClient({_llm_key(args, "value is 4.0"): response}),
+    ).run(RepresentInput(spec_version=spec_version, query_time=BASE_TIME.isoformat()))
+
+    assert result.outputs.tensor.item() == pytest.approx(6.0)
+    assert raw_hash in result.outputs.input_hashes
+    assert len(result.outputs.input_hashes) == 2
+
+    missing_raw_dep = _mixed_raw_llm_body(raw_hash)
+    missing_raw_dep["deps"] = []
+    bad_registry = SpecRegistry()
+    bad_spec = bad_registry.register(finalize_spec(missing_raw_dep))
+    bad_stage = _runner(
+        registry=bad_registry,
+        artifacts=artifacts,
+        audit=audit,
+        access=access,
+        writer=writer,
+        llm_client=StubLLMClient({}),
+    )
+    with pytest.raises(DependencyEnvelopeError):
+        bad_stage.run(RepresentInput(spec_version=bad_spec, query_time=BASE_TIME.isoformat()))
+
+
+def test_represent_stage_requires_writer_before_llm_execution(
+    artifacts: ArtifactStore,
+    audit: AuditLog,
+    access: AccessLayer,
+) -> None:
+    registry = SpecRegistry()
+    spec_version = registry.register(finalize_spec(_llm_text_body()))
+    stage = _runner(
+        registry=registry,
+        artifacts=artifacts,
+        audit=audit,
+        access=access,
+        writer=None,
+        llm_client=StubLLMClient({}),
+    )
+
+    with pytest.raises(RuntimeError, match="requires a writer"):
+        stage.run(RepresentInput(spec_version=spec_version, query_time=BASE_TIME.isoformat()))
+
+
+def test_cost_drift_records_on_miss_and_hit(
+    tmp_path: Path,
+    rawstore: RawStore,
+    audit: AuditLog,
+    access: AccessLayer,
+    writer: RawStoreWriter,
+) -> None:
+    args = _llm_args(declared_cost_usd=0.001, cost_tolerance=0.20)
+    response = LLMResponse(text="hello", input_tokens=1000, output_tokens=1000, raw_json={})
+    registry = SpecRegistry()
+    spec_version = registry.register(finalize_spec(_llm_text_body(args)))
+    artifacts_one = ArtifactStore(tmp_path / "artifacts-drift-one")
+    artifacts_two = ArtifactStore(tmp_path / "artifacts-drift-two")
+    try:
+        miss = _runner(
+            registry=registry,
+            artifacts=artifacts_one,
+            audit=audit,
+            access=access,
+            writer=writer,
+            llm_client=StubLLMClient({_llm_key(args, "fixed prompt"): response}),
+        ).run(RepresentInput(spec_version=spec_version, query_time=BASE_TIME.isoformat()))
+        hit = _runner(
+            registry=registry,
+            artifacts=artifacts_two,
+            audit=audit,
+            access=access,
+            writer=writer,
+            llm_client=StubLLMClient({}),
+        ).run(RepresentInput(spec_version=spec_version, query_time=BASE_TIME.isoformat()))
+    finally:
+        artifacts_one.close()
+        artifacts_two.close()
+
+    drift_records = [r for r in _audit_records(audit) if r["category"] == "CostDrift"]
+    assert len(drift_records) == 2
+    assert {r["node_id"] for r in drift_records} == {"call"}
+    assert drift_records[0]["realized_usd"] == pytest.approx(0.0028)
+    assert miss.outputs.cost_used.llm_usd == pytest.approx(0.0028)
+    assert hit.outputs.cost_used.llm_usd == pytest.approx(0.0028)
+
+
+def test_cost_drift_within_tolerance_emits_no_record(
+    rawstore: RawStore,
+    artifacts: ArtifactStore,
+    audit: AuditLog,
+    access: AccessLayer,
+    writer: RawStoreWriter,
+) -> None:
+    args = _llm_args(declared_cost_usd=0.003, cost_tolerance=0.20)
+    p_hash = prompt_hash("fixed prompt")
+    par_hash = params_hash(model=args["model"], params=args["params"])
+    _seed_llm_cache(
+        rawstore,
+        model=args["model"],
+        prompt_hash_value=p_hash,
+        params_hash_value=par_hash,
+        text="hello",
+        input_tokens=1000,
+        output_tokens=1000,
+    )
+    registry = SpecRegistry()
+    spec_version = registry.register(finalize_spec(_llm_text_body(args)))
+    _runner(
+        registry=registry,
+        artifacts=artifacts,
+        audit=audit,
+        access=access,
+        writer=writer,
+        llm_client=StubLLMClient({}),
+    ).run(RepresentInput(spec_version=spec_version, query_time=BASE_TIME.isoformat()))
+
+    assert [r for r in _audit_records(audit) if r["category"] == "CostDrift"] == []
 
 
 def test_deps_envelope_fails_before_access_call(
