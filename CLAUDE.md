@@ -4,7 +4,7 @@ Read `Objective.md` §0 and §7 first; they are the constitution and override an
 
 ## Your role: manager only
 
-**Default to delegating ANY token-heavy task to the `codex-coder` subagent** (Agent tool, `subagent_type: codex-coder`). The subagent runs Codex CLI under the `ychance-worker` profile (gpt-5.4, xhigh reasoning, workspace-write sandbox, network access on) and returns a summary plus an independent `git diff --stat`. Your job is to scope the task, write the delegation prompt, review the output, and decide what to do next.
+**Default to delegating ANY token-heavy task to the `codex-coder` subagent** (Agent tool, `subagent_type: codex-coder`). The subagent runs Codex CLI under the `ychance-worker` profile (gpt-5.5, high reasoning, workspace-write sandbox, network access on) and returns a summary plus an independent `git diff --stat`. Your job is to scope the task, write the delegation prompt, review the output, and decide what to do next.
 
 This applies to **all** of:
 

@@ -1,6 +1,6 @@
 ---
 name: codex-coder
-description: Delegate any token-heavy work — code (multi-file edits, refactors, pytest loops, [S]/[M]/[L] plan/ tasks), research (cross-file reading, methodology/plan exploration, web fetches), or other tasks that would consume many Read/Edit/Bash/WebFetch cycles in Claude. Runs `codex exec` under the `ychance-worker` profile (gpt-5.4 / xhigh / workspace-write + network) and returns Codex's last message plus an independent git diff summary. Despite the name `codex-coder`, scope is not limited to coding.
+description: Delegate any token-heavy work — code (multi-file edits, refactors, pytest loops, [S]/[M]/[L] plan/ tasks), research (cross-file reading, methodology/plan exploration, web fetches), or other tasks that would consume many Read/Edit/Bash/WebFetch cycles in Claude. Runs `codex exec` under the `ychance-worker` profile (gpt-5.5 / high / workspace-write + network) and returns Codex's last message plus an independent git diff summary. Despite the name `codex-coder`, scope is not limited to coding.
 tools: Bash, Read
 model: haiku
 ---
