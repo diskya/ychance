@@ -38,7 +38,7 @@ Every record has: `timestamp`, `record_id` (UUID), `record_hash`, `prev_hash`, `
 - `rule_id`, `screen_window`, `statistics` (all of them, not a summary), `pass/fail`, `compute_cost`.
 
 ### Validate records
-- `rule_id`, `validate_protocol_version`, `windows_used` (with proof of disjointness from Screen windows), `utility_distribution`, `competitor_reports`, `robustness_profile`, `regime_partition`, `compute_cost`, `llm_cost`.
+- `rule_id`, `validate_protocol_version`, `windows_used` (with proof of disjointness from Screen windows), `utility_distribution`, `challenger_reports`, `robustness_profile`, `partition_profile`, `compute_cost`, `llm_cost`.
 
 ### Council records
 - One record per member per rule:
@@ -50,7 +50,7 @@ Every record has: `timestamp`, `record_id` (UUID), `record_hash`, `prev_hash`, `
 - Per-tick / per-firing: `rule_id`, `paper_deploy_id`, `firing_time`, `C_value` (boolean + the values `C` consumed), `A_value`, `position_after`, `paper_cost_model_version`, `realized_paper_pnl_contribution`.
 
 ### Observe records
-- `rule_id`, `window`, `realized_vs_predicted_test`, `distribution_match_statistic`, `correlation_vector` (with every live rule), `regime_tag_performance`.
+- `rule_id`, `window`, `realized_vs_predicted_test`, `distribution_match_statistic`, `correlation_vector` (with every live rule), `partition_tag_performance`.
 
 ### Graduate / Retire records
 - **Graduate**: `rule_id`, `size_allocated`, `gates_fired` (with references to the specific Validate/Council/Observe records that satisfied each gate), `operator_ack_record_id`.

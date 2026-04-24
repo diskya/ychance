@@ -7,22 +7,22 @@ Initial hypothesis under M6. **The validation protocol is itself a hypothesis su
 
 For each rule `R` admitted by Screen, Validate emits:
 1. An **out-of-sample utility distribution**: the empirical distribution of `U(R)` realized across held-out windows, constructed under the splitting rule below.
-2. A **competitor dominance report**: per-competitor statistics comparing `R` to each challenger in the competitor set (next section). Dominance is measured in utility, not in mean return, not in risk-adjusted return alone, not in any ratio inherited from an external framework.
+2. A **challenger dominance report**: per-challenger statistics comparing `R` to each challenger in the challenger set (next section). Dominance is measured in utility, not in mean return, not in risk-adjusted return alone, not in any ratio inherited from an external framework.
 3. A **robustness profile**: performance of `R` across cross-validation folds, perturbations of `C`'s thresholds, and perturbations of feature definitions feeding `C`.
 4. A **data-reuse audit**: a proof that no data point used in any Screen window for `R` appears in any Validate window for `R`, derived from lineage in the raw store.
 
 No Validate output is a scalar. A rule is described by distributions; Council reads distributions, not point estimates.
 
-## Competitors, not baselines
+## Neutral challengers, not privileged floors
 
-Per M4, baselines are not privileged floors. Each rule is compared to a **competitor set** whose members must pass the same gate by the same metric. The initial competitor set (itself a hypothesis):
+Per M4, no comparison object is a privileged floor. Each rule is compared to a **challenger set** whose members must pass the same gate by the same metric. The initial challenger set (itself a hypothesis):
 
-- **Cash**: `A = hold cash`. Trivial but honest.
-- **Buy-and-hold on `R`'s realized tradable universe**: whatever instruments `R`'s `C` fires on, hold them in equal weight and compare.
-- **Randomized `R`**: the same `(A, H, X)` but with `C` replaced by a Bernoulli process matched to `R`'s realized firing rate. Tests whether `C` actually selects informative times.
-- **Permuted-feature `R`**: `R` evaluated on feature tensors with the time index shuffled within each feature family. Tests whether the rule depends on the actual temporal structure of features rather than their marginal distribution.
+- **Inactive**: no position is opened. Trivial but honest.
+- **Context-removed `R`**: the same `(A, H, X)` with the context predicate removed as the entry selector. Tests whether the selector adds utility beyond the rule's mechanics.
+- **Context-randomized `R`**: the same `(A, H, X)` with `C` replaced by a deterministic sample matched to `R`'s realized firing count. Tests whether `C` selects informative times.
+- **Input-permuted `R`**: `R` evaluated on feature tensors with the time index shuffled within each feature family feeding `C`. Tests whether the rule depends on the actual temporal structure of its inputs rather than their marginal distribution.
 
-A rule passes Validate iff it dominates every competitor on a pre-committed majority of the split partitions — where "dominate" means the rule's utility-distribution stochastically dominates the competitor's at a pre-committed order. Stochastic dominance is used instead of a point statistic because a point statistic smuggles in assumptions about the utility functional form.
+A rule passes Validate iff it dominates every challenger on a pre-committed majority of the split partitions — where "dominate" means the rule's utility-distribution stochastically dominates the challenger's at a pre-committed order. Stochastic dominance is used instead of a point statistic because a point statistic smuggles in assumptions about the utility functional form.
 
 ## Splitting rule
 
@@ -30,7 +30,7 @@ Time-respecting splits only. A window used for any input (feature fit, rule sele
 
 Nested splits: an outer fold to estimate out-of-sample utility distribution; an inner fold inside each outer train half for any threshold or feature-weight tuning. No tuning at all happens on outer holdout.
 
-**Regime partitions.** Held-out windows are additionally partitioned by **regime tags** — tags are themselves AI-proposed clusters over market state (volatility percentiles, cross-sectional dispersion percentiles, event-density percentiles — computed from the raw store, not from external labels). A rule must dominate competitors in the majority of regime tags, not only in aggregate. Regime tags are re-derived every M2a.
+**Validation partitions.** Held-out windows may additionally be partitioned by AI-proposed tags derived from this methodology's own observable inputs, not from external labels or named states. A rule must dominate challengers in the majority of active partition tags, not only in aggregate. Partition tags are re-derived every M2a.
 
 ## Utility functional form
 
@@ -54,11 +54,11 @@ Until enough rules have been graduated and lived long enough to populate the met
 
 ## What Validate does not do
 
-- **No `p`-value threshold inherited from convention.** Any threshold is pre-committed and lives in the config artifact; it can be changed at M2a with a rationale.
+- **No convention-derived significance threshold.** Any threshold is pre-committed and lives in the config artifact; it can be changed at M2a with a rationale.
 - **No reporting of single-number performance stats.** A rule is not summarized by a scalar. If Council asks for a scalar, the answer is "report the distribution."
 - **No in-sample tuning.** Any in-sample optimization of `R`'s parameters happens within Propose's candidate-generation budget, before the rule reaches Validate.
 
 ## Revision triggers
 
 - Scheduled: every M2a, via the meta-validation procedure above.
-- Unscheduled: a systematic mismatch between Validate-predicted `U(R)` and Observe-realized `U(R)` across many rules is a falsification signal; Council convenes out-of-cycle.
+- Unscheduled: a systematic mismatch between Validate-predicted `U(R)` and Observe-realized `U(R)` across many rules is a falsification trigger; Council convenes out-of-cycle.

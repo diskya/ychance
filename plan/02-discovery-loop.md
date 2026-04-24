@@ -88,9 +88,9 @@
 >
 > (b) Nested inner/outer folds with no-tuning-on-outer. Any tuning happens inside outer-train, never on outer-holdout.
 >
-> (c) Regime-tag partitioning with AI-derived tags (see 4.2). A rule must dominate competitors in a majority of regime tags, not only in aggregate.
+> (c) Partitioning with AI-derived tags (see 4.2). A rule must dominate challengers in a majority of partition tags, not only in aggregate.
 >
-> (d) The four-competitor set (cash, buy-and-hold on `R`'s realized universe, randomized-`C`, permuted-feature). Implementation for each.
+> (d) The four neutral challengers (inactive, context-removed, context-randomized, input-permuted). Implementation for each.
 >
 > (e) Stochastic-dominance testing at a pre-committed order. Dominance is the gate; a point statistic is not.
 >
@@ -100,15 +100,15 @@
 
 ### Coding prompt (after design)
 
-> Implement `validate/` per the attached design. All four competitor generators are testable modules. The output is a `ValidationReport` with distributions (never scalars). Include property tests on split disjointness (no data point in any Screen window for `R` appears in any Validate window for `R` — proof derived from lineage). Emit Validate records per [../methodology/09-audit.md](../methodology/09-audit.md) §"Validate records".
+> Implement `validate/` per the attached design. All four challenger generators are testable modules. The output is a `ValidationReport` with distributions (never scalars). Include property tests on split disjointness (no data point in any Screen window for `R` appears in any Validate window for `R` — proof derived from lineage). Emit Validate records per [../methodology/09-audit.md](../methodology/09-audit.md) §"Validate records".
 
 ---
 
-## 4.2 Regime-tag derivation — **[M]**
+## 4.2 Partition-tag derivation — **[M]**
 
-> Implement `regimes/` that derives regime tags from raw-store state per [../methodology/04-validation.md](../methodology/04-validation.md): clusters over volatility percentiles, cross-sectional dispersion percentiles, event-density percentiles — all computed from the raw store, never from externally-labeled regimes. Tags are named `regime_0`, `regime_1`, … with statistical fingerprints attached. Re-derived every M2a.
+> Implement `partitions/` that derives partition tags from raw-store state per [../methodology/04-validation.md](../methodology/04-validation.md): clusters over measurable state summaries computed from the raw store, never from externally-labeled states. Tags are named `partition_0`, `partition_1`, … with statistical fingerprints attached. Re-derived every M2a.
 >
-> No regime tag inherits a name from an external regime taxonomy. If a future reader looks at a regime fingerprint and says "that's a well-known regime" — fine, that is coincidence, not design.
+> No partition tag inherits a name from an external taxonomy. If a future reader maps a partition fingerprint onto an outside label, that mapping is not part of the methodology.
 
 ---
 
@@ -122,7 +122,7 @@ Don't build until you have graduated/retired rules to score. When you do:
 
 ## Exit criteria for this phase
 
-- A synthetic rule passes through Propose → Originality → Screen → Validate end-to-end on test data, producing a `ValidationReport` with competitor-dominance output.
+- A synthetic rule passes through Propose → Originality → Screen → Validate end-to-end on test data, producing a `ValidationReport` with challenger-dominance output.
 - LLM spend during a full cycle is within budget (cheap-model-first discipline verified).
 - Propose prompt templates have been grep-reviewed for named strategies, factor labels, or inherited taxonomies — zero matches.
 - Screen and Validate windows for a rule are provably disjoint (lineage-based test passes).
