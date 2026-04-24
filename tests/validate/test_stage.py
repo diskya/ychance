@@ -10,11 +10,13 @@ from hypothesis import strategies as st
 
 from access import AccessLayer, WindowReservationBook, WindowReservationError
 from audit import AuditLog
+from partitions import PartitionConfig, PartitionWindow, derive_partition_assignment
 from pipeline import ArtifactStore
 from rawstore import RawStore
 from rule import finalize_rule
 from tests.rule.fixtures.helpers import (
     GROUND_SPEC,
+    OTHER_SPEC,
     PRICE_SPEC,
     SeriesRegistry,
     context_price_le,
@@ -224,6 +226,72 @@ def test_validate_runs_disjoint_and_emits_distribution_report(
     assert validate_record["utility_distribution"]["samples"]
     assert validate_record["challenger_reports"][0]["utility_distribution"]["samples"]
     assert validate_record["partition_profile"]["active_partitions"] == ["partition_0"]
+
+
+def test_validate_uses_supplied_partition_assignment_hash(
+    artifacts: ArtifactStore,
+    audit: AuditLog,
+    access: AccessLayer,
+    reservations: WindowReservationBook,
+) -> None:
+    registry = _registry()
+    registry.series_by_id[OTHER_SPEC] = [0.0] * 14 + [100.0] * 4 + [0.0] * 30
+    rule = _rule()
+    access.reserve_window(rule_id=rule.rule_id, stage="Screen", t0=tick(0), t1=tick(5))
+    partition_config = PartitionConfig(
+        config_version="test-partitions",
+        partition_count=2,
+        summary_window_bars=1,
+        summary_statistics=("last",),
+        fingerprint_quantiles=(0.0, 0.5, 1.0),
+        max_iterations=25,
+        convergence_tolerance=0.0,
+        standardize_epsilon=0.000000000001,
+    )
+    partition_result = derive_partition_assignment(
+        registry=registry,
+        access=access,
+        artifacts=artifacts,
+        window=PartitionWindow(tick(6).isoformat(), tick(35).isoformat()),
+        step_seconds=60,
+        state_spec_refs=(OTHER_SPEC,),
+        config=partition_config,
+    )
+
+    report = _stage(
+        registry=registry,
+        artifacts=artifacts,
+        audit=audit,
+        access=access,
+    ).run(
+        ValidateInput(
+            cycle_id="validate-cycle",
+            rule=rule,
+            validate_window=ValidateWindow(tick(6).isoformat(), tick(35).isoformat()),
+            config=_config(),
+            screen_output_hash="a" * 64,
+            partition_assignment_hash=partition_result.assignment_hash,
+        )
+    ).outputs
+
+    assert reservations.exact(
+        rule_id=rule.rule_id,
+        stage="Validate",
+        t0=tick(6),
+        t1=tick(35),
+    )
+    profile = report.partition_profile
+    assert profile["partition_assignment_hash"] == partition_result.assignment_hash
+    assert profile["partition_config_version"] == "test-partitions"
+    assert profile["partition_config_hash"] == partition_result.assignment.config_hash
+    assert profile["partition_source"] == "assignment_artifact"
+    assert profile["active_partitions"] == ["partition_0", "partition_1"]
+    assert len(profile["fingerprints"]) == 2
+    for challenger in report.challenger_reports:
+        assert [item.partition_id for item in challenger.partition_results] == [
+            "partition_0",
+            "partition_1",
+        ]
 
 
 def test_validate_refuses_screen_overlap_before_stage_record(

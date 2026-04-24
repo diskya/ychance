@@ -12,6 +12,13 @@ from typing import Any, Callable, Mapping
 import numpy as np
 
 from audit import canonicalize
+from partitions import (
+    assignment_hash as partition_assignment_digest,
+    assignment_profile,
+    fallback_profile,
+    load_partition_assignment,
+    partition_id_for_window,
+)
 from pipeline import CostCeiling, InvariantViolation, Stage, StageContext, StageResult
 from rule import DEFAULT_EXIT_OPS, Rule, Trade, finalize_rule, load_rule
 from rule.predicate_ops import EvalContext, coerce_scalar, execute_dag, resolve_spec_output
@@ -227,7 +234,7 @@ class ValidationReport:
 
 class ValidateStage(Stage):
     name = "validate_stage"
-    version = "1"
+    version = "2"
     audit_stage = "Validate"
     cost_ceiling = CostCeiling(compute_usd=25.0, llm_usd=0.0, data_reads=250000)
     InputType = ValidateInput
@@ -254,6 +261,11 @@ class ValidateStage(Stage):
         result = super().run(inputs, envelope=env)
         if result.cache_hit and isinstance(inputs, ValidateInput):
             self._ensure_cached_reservation(result.outputs)
+            if inputs.partition_assignment_hash is not None:
+                _load_partition_assignment_from_artifacts(
+                    self._artifacts,
+                    inputs.partition_assignment_hash,
+                )
         return result
 
     def fingerprint(self, inputs: Any) -> tuple[str, str]:
@@ -299,6 +311,11 @@ class ValidateStage(Stage):
         )
         tracker = _RuleCostTracker(rule.rule_id, inputs.config, ctx)
         access = _CostedAccess(ctx.access, tracker)
+        partition_context = _partition_context(
+            artifacts=self._artifacts,
+            partition_assignment_hash=inputs.partition_assignment_hash,
+            folds=folds,
+        )
 
         rule_samples: list[float] = []
         challenger_samples: dict[str, list[float]] = {
@@ -365,6 +382,8 @@ class ValidateStage(Stage):
                 rule_distribution=utility_distribution,
                 challenger_samples=tuple(samples),
                 config=inputs.config,
+                partition_ids=partition_context.fold_partition_ids,
+                active_partitions=partition_context.active_partitions,
             )
             for challenger_id, samples in challenger_samples.items()
         )
@@ -375,11 +394,6 @@ class ValidateStage(Stage):
             "checked_window": inputs.validate_window.as_dict(),
             "validate_reservation": reservation.as_dict(),
             "dependency_gap_bars": dependency_gap_bars,
-        }
-        partition_profile = {
-            "active_partitions": ["partition_0"],
-            "partition_assignment_hash": inputs.partition_assignment_hash,
-            "partition_source": "single_validate_partition",
         }
         return ValidationReport(
             rule_id=rule.rule_id,
@@ -399,7 +413,7 @@ class ValidateStage(Stage):
                 tracker=tracker,
                 input_permuted_samples=tuple(challenger_samples["input_permuted"]),
             ),
-            partition_profile=partition_profile,
+            partition_profile=partition_context.profile,
             config_hash=config_hash(inputs.config),
         )
 
@@ -425,6 +439,20 @@ class ValidateStage(Stage):
                 raise InvariantViolation("challenger utility distribution must not be empty")
         if outputs.disjointness_proof.get("checked_by") != "AccessLayer.assert_window_available":
             raise InvariantViolation("disjointness proof must name the access-layer check")
+        if outputs.partition_profile.get("partition_assignment_hash") != inputs.partition_assignment_hash:
+            raise InvariantViolation("partition assignment hash does not match ValidateInput")
+        active_partitions = outputs.partition_profile.get("active_partitions")
+        if (
+            not isinstance(active_partitions, list)
+            or not active_partitions
+            or len(set(active_partitions)) != len(active_partitions)
+            or any(not _is_partition_id(item) for item in active_partitions)
+        ):
+            raise InvariantViolation("active partitions must be unique canonical ids")
+        for report in outputs.challenger_reports:
+            report_partitions = [item.partition_id for item in report.partition_results]
+            if report_partitions != active_partitions:
+                raise InvariantViolation("challenger partition results must cover active partitions")
 
     def audit_extra_payload(
         self,
@@ -628,6 +656,54 @@ class _TimePermutedRegistry:
         return resolve_spec_output(spec_id, t, access, self._base)
 
 
+@dataclass(frozen=True)
+class _PartitionContext:
+    active_partitions: tuple[str, ...]
+    fold_partition_ids: tuple[str, ...]
+    profile: dict[str, Any]
+
+
+def _partition_context(
+    *,
+    artifacts: Any,
+    partition_assignment_hash: str | None,
+    folds: tuple[ValidateFold, ...],
+) -> _PartitionContext:
+    if partition_assignment_hash is None:
+        fold_ids = tuple(fold.fold_id for fold in folds)
+        return _PartitionContext(
+            active_partitions=("partition_0",),
+            fold_partition_ids=tuple("partition_0" for _ in folds),
+            profile=fallback_profile(fold_ids=fold_ids),
+        )
+
+    assignment = _load_partition_assignment_from_artifacts(artifacts, partition_assignment_hash)
+    fold_partitions: list[dict[str, str]] = []
+    fold_partition_ids: list[str] = []
+    for fold in folds:
+        t0, t1 = fold.holdout_window.as_tuple()
+        partition_id = partition_id_for_window(assignment, t0=t0, t1=t1)
+        fold_partitions.append({"fold_id": fold.fold_id, "partition_id": partition_id})
+        fold_partition_ids.append(partition_id)
+    profile = assignment_profile(
+        assignment,
+        assignment_hash_value=partition_assignment_hash,
+        fold_partitions=tuple(fold_partitions),
+    )
+    return _PartitionContext(
+        active_partitions=tuple(str(item) for item in profile["active_partitions"]),
+        fold_partition_ids=tuple(fold_partition_ids),
+        profile=profile,
+    )
+
+
+def _load_partition_assignment_from_artifacts(artifacts: Any, assignment_hash_value: str):
+    assignment = load_partition_assignment(artifacts.get(assignment_hash_value))
+    if partition_assignment_digest(assignment) != assignment_hash_value:
+        raise ValueError("partition assignment artifact hash does not match its content")
+    return assignment
+
+
 def _simulate_rule(
     rule: Rule,
     window: tuple[datetime, datetime],
@@ -770,27 +846,42 @@ def _challenger_report(
     rule_distribution: UtilityDistribution,
     challenger_samples: tuple[float, ...],
     config: ValidateConfig,
+    partition_ids: tuple[str, ...],
+    active_partitions: tuple[str, ...],
 ) -> ChallengerReport:
     challenger_distribution = UtilityDistribution(
         construction=challenger_id,
         samples=challenger_samples,
     )
-    dominance_grid, dominates = _dominance_grid(
-        rule_distribution.samples,
-        challenger_distribution.samples,
-        config,
-    )
-    partition = PartitionResult(
-        partition_id="partition_0",
-        dominance_order=config.dominance_order,
-        dominance_grid=dominance_grid,
-        dominates=dominates,
-    )
-    fraction = 1.0 if dominates else 0.0
+    if len(rule_distribution.samples) != len(challenger_samples):
+        raise ValueError("rule and challenger sample counts must match")
+    if len(partition_ids) != len(rule_distribution.samples):
+        raise ValueError("one partition id is required per utility sample")
+    if not active_partitions:
+        raise ValueError("active_partitions must not be empty")
+    partition_results: list[PartitionResult] = []
+    for partition_id in active_partitions:
+        indices = [index for index, item in enumerate(partition_ids) if item == partition_id]
+        if not indices:
+            raise ValueError("active partition has no utility samples")
+        dominance_grid, dominates = _dominance_grid(
+            tuple(rule_distribution.samples[index] for index in indices),
+            tuple(challenger_distribution.samples[index] for index in indices),
+            config,
+        )
+        partition_results.append(
+            PartitionResult(
+                partition_id=partition_id,
+                dominance_order=config.dominance_order,
+                dominance_grid=dominance_grid,
+                dominates=dominates,
+            )
+        )
+    fraction = sum(item.dominates for item in partition_results) / len(partition_results)
     return ChallengerReport(
         challenger_id=challenger_id,
         utility_distribution=challenger_distribution,
-        partition_results=(partition,),
+        partition_results=tuple(partition_results),
         dominance_fraction=fraction,
         result="pass" if fraction >= config.min_challenger_pass_fraction else "fail",
     )
@@ -1050,6 +1141,13 @@ def _seed(rule_id: str, fold_id: str, config: ValidateConfig, salt: str) -> int:
 
 def _hash_payload(payload: dict[str, Any]) -> str:
     return hashlib.sha256(canonicalize(payload)).hexdigest()
+
+
+def _is_partition_id(raw: Any) -> bool:
+    if not isinstance(raw, str) or not raw.startswith("partition_"):
+        return False
+    suffix = raw.removeprefix("partition_")
+    return suffix.isdigit() and str(int(suffix)) == suffix
 
 
 def _parse_time(raw: str | datetime, field: str) -> datetime:

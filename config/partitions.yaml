@@ -1,0 +1,11 @@
+# Partition derivation parameters. Revisable at M2a only.
+
+partitions:
+  config_version: partitions-v1
+  partition_count: 3
+  summary_window_bars: 5
+  summary_statistics: [mean, std, last]
+  fingerprint_quantiles: [0.1, 0.5, 0.9]
+  max_iterations: 100
+  convergence_tolerance: 0.000000000001
+  standardize_epsilon: 0.000000000001
