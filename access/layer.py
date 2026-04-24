@@ -24,6 +24,12 @@ from typing import Any, Callable
 from audit import AuditLog
 from rawstore import Provenance, RawStore
 
+from .reservations import (
+    WindowReservation,
+    WindowReservationBook,
+    WindowReservationError,
+)
+
 
 class RateLimitExceeded(RuntimeError):
     """Raised when an access call would exceed the current cycle's read budget."""
@@ -61,6 +67,7 @@ class AccessLayer:
         *,
         cycle_id: str,
         max_reads_per_cycle: int,
+        reservation_book: WindowReservationBook | None = None,
     ) -> None:
         if not isinstance(store, RawStore):
             raise TypeError("store must be a RawStore")
@@ -70,7 +77,13 @@ class AccessLayer:
             raise ValueError("cycle_id must be a non-empty string")
         if not isinstance(max_reads_per_cycle, int) or max_reads_per_cycle < 0:
             raise ValueError("max_reads_per_cycle must be a non-negative int")
+        if reservation_book is not None and not isinstance(
+            reservation_book,
+            WindowReservationBook,
+        ):
+            raise TypeError("reservation_book must be a WindowReservationBook or None")
         self.__audit = audit
+        self.__reservation_book = reservation_book
         self._cycle_id = cycle_id
         self._max_reads = max_reads_per_cycle
         self._count = 0
@@ -220,6 +233,105 @@ class AccessLayer:
         self._cycle_id = cycle_id
         self._count = 0
 
+    # --- window reservations --------------------------------------------
+
+    def reserve_window(
+        self,
+        *,
+        rule_id: str,
+        stage: str,
+        t0: datetime,
+        t1: datetime,
+    ) -> WindowReservation:
+        """Reserve a rule/window for a stage.
+
+        Screen calls this before evaluating its held-out window. The booking
+        is idempotent for the same ``(rule_id, stage, t0, t1)`` tuple.
+        """
+        if self.__reservation_book is None:
+            raise RuntimeError("AccessLayer has no WindowReservationBook")
+        reservation, created = self.__reservation_book.reserve(
+            rule_id=rule_id,
+            stage=stage,
+            t0=t0,
+            t1=t1,
+            cycle_id=self._cycle_id,
+        )
+        self._log_window_reservation(
+            action="reserve",
+            outcome="reserved" if created else "already_reserved",
+            reservation=reservation,
+            requested_stage=stage,
+            overlap_count=0,
+        )
+        return reservation
+
+    def ensure_window_reserved(
+        self,
+        *,
+        rule_id: str,
+        stage: str,
+        t0: datetime,
+        t1: datetime,
+    ) -> WindowReservation:
+        """Return the exact reservation, creating and auditing it if absent."""
+        if self.__reservation_book is None:
+            raise RuntimeError("AccessLayer has no WindowReservationBook")
+        existing = self.__reservation_book.exact(
+            rule_id=rule_id,
+            stage=stage,
+            t0=t0,
+            t1=t1,
+        )
+        if existing is not None:
+            return existing
+        return self.reserve_window(rule_id=rule_id, stage=stage, t0=t0, t1=t1)
+
+    def assert_window_available(
+        self,
+        *,
+        rule_id: str,
+        stage: str,
+        t0: datetime,
+        t1: datetime,
+    ) -> None:
+        """Refuse Validate windows that overlap Screen reservations."""
+        if self.__reservation_book is None:
+            raise RuntimeError("AccessLayer has no WindowReservationBook")
+        if not isinstance(rule_id, str) or len(rule_id) != 64:
+            raise ValueError("rule_id must be a 64-character string")
+        if stage not in {"Screen", "Validate"}:
+            raise ValueError("reservation stage must be Screen or Validate")
+        if stage != "Validate":
+            self._log_window_check(
+                rule_id=rule_id,
+                stage=stage,
+                t0=t0,
+                t1=t1,
+                outcome="available",
+                overlaps=[],
+            )
+            return
+        overlaps = self.__reservation_book.overlapping(
+            rule_id=rule_id,
+            t0=t0,
+            t1=t1,
+            stage="Screen",
+        )
+        outcome = "refused" if overlaps else "available"
+        self._log_window_check(
+            rule_id=rule_id,
+            stage=stage,
+            t0=t0,
+            t1=t1,
+            outcome=outcome,
+            overlaps=overlaps,
+        )
+        if overlaps:
+            raise WindowReservationError(
+                f"Validate window overlaps Screen reservation for rule {rule_id}"
+            )
+
     # --- internals -------------------------------------------------------
 
     def _enforce_budget(self, *, hash: str, qt: datetime, kind: str) -> None:
@@ -252,3 +364,57 @@ class AccessLayer:
         }
         record.update(extra)
         self.__audit.append(record)
+
+    def _log_window_reservation(
+        self,
+        *,
+        action: str,
+        outcome: str,
+        reservation: WindowReservation,
+        requested_stage: str,
+        overlap_count: int,
+    ) -> None:
+        self.__audit.append(
+            {
+                "category": "Access",
+                "stage": "access",
+                "envelope": {
+                    "cycle_id": self._cycle_id,
+                    "rule_id": reservation.rule_id,
+                },
+                "kind": "window_reservation",
+                "action": action,
+                "outcome": outcome,
+                "requested_stage": requested_stage,
+                "reservation": reservation.as_dict(),
+                "overlap_count": overlap_count,
+            }
+        )
+
+    def _log_window_check(
+        self,
+        *,
+        rule_id: str,
+        stage: str,
+        t0: datetime,
+        t1: datetime,
+        outcome: str,
+        overlaps: list[WindowReservation],
+    ) -> None:
+        start = _ensure_utc(t0)
+        end = _ensure_utc(t1)
+        self.__audit.append(
+            {
+                "category": "Access",
+                "stage": "access",
+                "envelope": {"cycle_id": self._cycle_id, "rule_id": rule_id},
+                "kind": "window_reservation_check",
+                "requested_stage": stage,
+                "requested_window": {
+                    "t0": start.isoformat(),
+                    "t1": end.isoformat(),
+                },
+                "outcome": outcome,
+                "overlaps": [reservation.as_dict() for reservation in overlaps],
+            }
+        )
