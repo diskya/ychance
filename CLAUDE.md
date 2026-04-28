@@ -26,7 +26,7 @@ When in doubt, delegate. Token savings on the Claude side are the whole point.
 When you write the prompt for `codex-coder`:
 
 - Cite the relevant `methodology/*.md` and `plan/*.md` sections by path.
-- Describe the **function** the code or analysis must perform. Never name a strategy, factor, or finance category — that's taxonomy leakage (see `plan/README.md` "Failure modes to watch during build → Taxonomy leakage via prompts"). §0 applies to your prompts too.
+- Describe the **function** the code or analysis must perform. Do not name a phenomenon, factor, or category that you would forbid the operator from typing into Discover — §0a (revised) applies to your prompts too. The relaxed §0 (Objective.md v3.0) prohibits *operator targeting*, not *all imports*; use that as the test. Statistics, hashing, council protocols are admissible substrate; "look for X-shaped patterns" is not.
 - State acceptance criteria (which tests must pass, which invariants must hold, what shape of answer you need), not an implementation sketch.
 - Scope tightly: name the files Codex is allowed to edit; for research, name the files it should read.
 

@@ -1,86 +1,33 @@
-# §6.7 Operator-Facing Workflow
+# §6.7 Operator Workflow
 
-## Status
-Initial hypothesis under M9. The workflow must be executable by one person within §2 bandwidth, including a degraded mode when the operator is unavailable.
+The workflow is small because there is no live trading, no kill switch, no execution to monitor.
 
-## The operator's job in one sentence
+## Daily — typically zero touch
 
-**Run the loop; don't substitute for the loop.** Clear the queue, fire the gates, log the events, hold the kill switch. Nothing more.
+The system runs Ingest, scheduled Discover cycles, and Audit on its own schedule. If a stage's invariant fails, Audit emits an `InvariantViolation` record and the affected stage halts. The operator is notified and resolves before the next scheduled cycle.
 
-## Daily cycle — ~15 minutes
+## Weekly cycle (≤ 30 minutes)
 
-Target frequency: every trading day the operator is available. Missing a day is not a crisis (Execute has order-of-the-day logic; missing days beyond the degraded-mode threshold triggers the auto-exit below).
+1. **Read the cycle log.** Discover cycles run, Patterns proposed, stage reached, archived count. Read; do not re-evaluate.
+2. **Read newly archived Patterns.** Browse the new corpus entries. Do not "approve" — Council already did. Read for understanding.
+3. **Submit the bias log entry.** One free-text line capturing any moment this week the operator was tempted to (a) type a content-shaped suggestion into Discover, (b) argue with a Council rejection, (c) add a Pattern from outside reading, (d) retire a Pattern because it looks "wrong." If nothing to note, write `none`. Empty is refused — `none` and missed weeks are different.
+4. **Acknowledge envelope status.** Read `$_spent / $B`. Halt new cycles if a budget is overrun.
 
-Steps (order matters):
+## Quarterly (M2a) cycle — ~½ day
 
-1. **Kill switch status check.** Confirm kill switch is in the intended state. If the operator cannot remember setting it, assume it is wrong and re-declare explicitly.
-2. **Audit pane glance.** Open [09-audit.md](09-audit.md)'s viewer. Look for:
-   - Un-ack'd pipeline errors (any stage that failed its invariant).
-   - Envelope overrun flags on `E_ops`.
-   - Retire events since last check (just note them; do not second-guess).
-3. **Execute queue clearance.** Confirm pending orders for the day match live rules' firings under current `C`. This is a **gate check**, not a review of the rules.
-   - Green: queue fires cleanly → approve.
-   - Amber: a broker-side issue (credit, symbol halt, capability issue) → log and skip affected orders; the affected rule will either Retire or survive on subsequent cycles.
-   - Red: queue disagrees with logged rule state → halt Execute, escalate to weekly-review state, do not place any orders until resolved.
-4. **Envelope touchpoint.** Check `E_ops` burn rate vs. plan. If overrun-projected, Audit should already have flagged it; confirm and let the automatic throttle do its job.
+1. **Architecture review.** Read the architecture diff Council produced. Execute or reject as a single all-or-nothing change.
+2. **Meta-validation.** Run the protocol's meta-validation per [04-empirical-test.md](04-empirical-test.md). Swap protocol if a challenger dominates.
+3. **Council membership review.** Read the independence audit and per-member calibration; rotate if indicated.
+4. **Anti-pattern list review.** Empty if meta-validation rejects its utility.
+5. **Bias log review.** A Council instance — *not* the operator — reads the bias log entries since last M2a and produces a drift report. The operator reads the report. (Reading one's own bias log invites self-justification.)
+6. **Clock health snapshot.** Read `t/T`, `$_spent/$B`, archive-entry count vs. `N_min`. Decide whether to invoke relax or abandon per [08-falsification-clock.md](08-falsification-clock.md).
 
-## Weekly cycle — ~2 hours
+## Degraded mode
 
-Target frequency: once per week, same day each week, pre-committed.
+Operator misses heartbeats for `N` consecutive days (initial `N=7`):
+- Discover halts new cycles.
+- Ingest, Represent, Audit continue. No data lost.
+- Council and EmpiricalTest finish in-flight Patterns then idle.
+- On return, an explicit "audit-gap ack" is required before Discover resumes — the operator reviews the gap-period audit records and acknowledges. Friction by design.
 
-Steps:
-
-1. **Retire review.** For each Retire event since last week, read the Retire record. Confirm the trigger condition matches the Retire rule in [03-discovery-loop.md](03-discovery-loop.md). Do **not** re-evaluate whether the rule should have been retired.
-2. **Graduate approval (gate check only).** For each Graduate candidate since last week:
-   - Confirm Validate output exists and is within pre-committed thresholds.
-   - Confirm Council has ≥2 *independent* approvals per [05-council.md](05-council.md).
-   - Confirm sizing from [06-sizing-risk-portfolio.md](06-sizing-risk-portfolio.md) fits current `E_cap` and correlation clamp.
-   - If all gates fired, approve. **Do not read the rule's grounding in hope of agreeing with it.** §7 again.
-3. **Paper-deploy review.** Confirm Paper-deploy duration requirements are being respected; confirm Observe is running distribution-match tests.
-4. **Meta-pane glance.** Check the meta-validation running tally (see [04-validation.md](04-validation.md)) — is it populating? Are there signals of a protocol mismatch?
-5. **Operator-bias log entry.** Write one line in a personal log: any moment in the past week when the operator was tempted to override a pipeline decision. This log is not seen by the Council; it exists to surface §7 re-insertion attempts at M2a.
-
-## Quarterly cycle (M2a) — ~1 day
-
-Target frequency: every 3 months, plus unscheduled triggers (drawdown breach, M8 relax path invocation, independence-audit pair collapse, systematic Observe-vs-Validate miscalibration).
-
-Steps:
-
-1. **Architecture review.** Council instances (rotated, distinct from the deploy-decision council) propose diffs to [01-architecture.md](01-architecture.md). Red-team each proposal. Operator executes the winning proposal; operator does not propose.
-2. **Meta-validation of the validation protocol.** Per [04-validation.md](04-validation.md). Replace current protocol if a challenger strictly dominates.
-3. **Originality-filter review.** The anti-pattern list in [03-discovery-loop.md](03-discovery-loop.md) is re-derived from the last cycle's statistics. Entries added, entries removed, entries re-weighted.
-4. **Council membership review.** Independence audit ([05-council.md](05-council.md)); calibration test; member rotations.
-5. **Sizing / partition re-declaration.** Re-declare `E_cap` / `E_ops` / `E_res` partition. Re-declare sizing function, drawdown ceilings, correlation clamp.
-6. **Tax-model recalibration.** Compare realized tax on closed positions to the model; re-fit.
-7. **M8 clock check.** Time remaining on `T`, spend remaining of `$B`. If the clock is near expiry and no success, read [08-falsification-clock.md](08-falsification-clock.md) and decide on relax or abandon.
-8. **Operator-bias log review.** Read the personal bias log; any pattern of near-override is itself a Council audit input on whether operator discipline is holding.
-
-## Degraded mode (M9)
-
-Triggered by: operator heartbeat absent for `N` consecutive days (initial hypothesis, revisable: `N = 5`). The operator heartbeat is an explicit daily ack in the Audit log; no ack = no heartbeat. Clock-based inference (weekend, known holiday) does not count.
-
-On trigger:
-1. Execute auto-closes all live positions per each rule's `X` or, if `X` is not immediately firable, a pre-committed retirement-exit policy (typically: market-close next available session, taking the spread).
-2. Propose, Screen, Validate, Council, Paper-deploy, Graduate all halt.
-3. Ingest, Represent, Audit continue so no data is lost.
-4. When the operator returns, the operator:
-   - Ack's the audit gap.
-   - Runs a full weekly cycle regardless of day-of-week.
-   - Restarts Propose manually. Live re-deployment requires full Propose→Graduate passage for every rule; no rule is simply "un-paused."
-
-Degraded mode is **safe by default and expensive by design** — it is meant to be unpleasant enough to deter overuse, but automatic enough that an unexpected incapacitation does not destroy capital.
-
-## What the operator is never asked to do
-
-- Choose which rule to deploy from a list of candidates.
-- Override a Retire trigger to keep a rule alive.
-- Size a rule, adjust a sizing function, or rebalance between rules mid-cycle.
-- Propose edges from outside reading, from intuition, or from memory of past trades.
-- Accelerate Graduate by shortening Paper-deploy.
-- Delay Retire because "maybe it will come back."
-
-Each of these is an instance of §7 re-insertion and is a discipline violation regardless of whether it would help in a specific case.
-
-## Bandwidth budget
-
-Target: ≤ 15 min/day + 2 hr/week + 1 day/quarter ≈ 5–7 hr/week average excluding quarterly days. If realized bandwidth exceeds this target sustainedly, the methodology is failing its §2 obligation and the excess is a Review input: either operator behavior is re-inserting human judgment (a §7 failure) or the pipeline is asking too much of the operator (an M9 failure surfaced at M2a).
+No live trading means no positions to close, no orders to cancel, no exposure to manage during degraded mode.

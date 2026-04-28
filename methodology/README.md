@@ -1,45 +1,26 @@
 # Methodology — Index
 
-This tree is the §6 deliverable mandated by [../Objective.md](../Objective.md). Read the Objective first; it is the constitution, and nothing here overrides it.
+Read [../Objective.md](../Objective.md) first; §0 overrides anything here. Every artifact in this directory is an initial hypothesis subject to M2a revision.
 
-## Status
+**Scope (v3.0):** corpus of council-approved, replication-tested Patterns. No trading.
 
-Every artifact here is an **initial hypothesis**. Nothing in this directory is a truth claim about markets, about how edges work, or about the "right" way to do anything. The methodology operates on the premise that its own configuration is wrong in specific, measurable ways and must be revised under the M2a cadence.
-
-## Files
-
-| File | §6 item |
+| File | Scope |
 |---|---|
-| [01-architecture.md](01-architecture.md) | Pipeline stages, interfaces, invariants |
-| [02-data-and-representation.md](02-data-and-representation.md) | What gets ingested and how it becomes features |
-| [03-discovery-loop.md](03-discovery-loop.md) | How candidate rules are proposed, tested, retired — **core** |
-| [04-validation.md](04-validation.md) | Statistical + out-of-sample testing regime |
-| [05-council.md](05-council.md) | Cross-family adversarial review protocol |
-| [06-sizing-risk-portfolio.md](06-sizing-risk-portfolio.md) | How capital is allocated across live rules |
-| [07-operator-workflow.md](07-operator-workflow.md) | Daily / weekly / quarterly routine; degraded mode |
-| [08-falsification-clock.md](08-falsification-clock.md) | M8 budget, success criterion, relax path, abandon path |
-| [09-audit.md](09-audit.md) | Append-only log schema and retention |
+| [01-architecture.md](01-architecture.md) | Stages and invariants |
+| [02-data-and-representation.md](02-data-and-representation.md) | Ingest + raw store + feature contract |
+| [03-discovery-loop.md](03-discovery-loop.md) | Discover stage — the core |
+| [04-empirical-test.md](04-empirical-test.md) | Replication on held-out windows |
+| [05-council.md](05-council.md) | Cross-family review with measured independence |
+| [07-operator-workflow.md](07-operator-workflow.md) | Weekly + M2a routines |
+| [08-falsification-clock.md](08-falsification-clock.md) | M8 budget, success, relax, abandon |
+| [09-audit.md](09-audit.md) | Audit trail schema |
 
-## §0 discipline — re-stated here because it is load-bearing
+## Notation
 
-- No design choice in this tree is imported from an external finance framework, textbook, practitioner tradition, or named strategy. Any such content that appears is a defect and should be removed on sight during review.
-- Names in this tree refer to **functions** (Ingest, Propose, Screen, Retire, etc.), not to inherited category schemas.
-- "Classical categories" of edge are neither embraced nor forbidden; they are simply not the vocabulary the methodology uses. A rule that coincidentally resembles a classical category survives or dies on its grounding and its out-of-sample utility, not on the resemblance.
-- The operator's job is to execute the loop, not to seed it with preferred edges. See [../Objective.md §7](../Objective.md).
+- **Pattern** `P = (spec_ref, assertion, scope, observation_window, replication_protocol)` — a falsifiable claim. Hash-addressed by `pattern_id`.
+- **Spec** — feature-family definition, content-addressed by `spec_id`.
+- **Assertion** — computable predicate over a spec's output (e.g., `quantile_ge(p=0.9, threshold=X)`).
+- **Replication** — recomputing the assertion on a window the Pattern was not derived from.
+- `E` — total envelope. `$B` — clock spend budget, subset of `E`. `T` — clock duration.
 
-## Envelope
-
-Total operator envelope `E` = **$50K–$100K**, covering capital deployed *plus* all operating cost (LLM inference, data feeds, compute, broker fees, tax, and friction). Every subsystem is budgeted against `E`, not against a separate infrastructure pool. The falsification-clock budget `$B` in [08-falsification-clock.md](08-falsification-clock.md) is a subset of `E`.
-
-## Notation used across files
-
-- `R = (C, A, H, X)` — a **rule**: context predicate `C`, action `A`, horizon `H`, exit condition `X`.
-- `G(R)` — **grounding**: the empirical signature in the data that `R` claims to exploit.
-- `U(R)` — **utility**: risk-adjusted, post-cost, post-tax return on capital committed to `R`, per §1. The functional form of `U` is itself a hypothesis under M6 (see [04-validation.md](04-validation.md)).
-- `E` — total envelope, above.
-- `$B` — M8 clock spend budget, subset of `E`.
-- `T` — M8 clock duration in months (12–24 initially).
-
-## What you should do as operator on day one
-
-Read [07-operator-workflow.md](07-operator-workflow.md). It is the only file required to run a daily cycle. The other files exist so you can audit, not so you can re-engineer.
+To run a weekly cycle: read [07-operator-workflow.md](07-operator-workflow.md). The other files exist so you can audit, not re-engineer.

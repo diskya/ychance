@@ -1,74 +1,54 @@
-# Phase 9 — Operator UX
+# Phase 5 — Operator UX
 
-**Goal**: the three panes, kill switch, heartbeat, degraded-mode automation, and bias log — everything in [../methodology/07-operator-workflow.md](../methodology/07-operator-workflow.md). This is the interface through which the operator executes the workflow without re-entering human discretion into the loop.
+**Goal**: weekly pane, M2a pane, bias log, archive browser per [../methodology/07-operator-workflow.md](../methodology/07-operator-workflow.md). No kill switch, no degraded-mode trade halting — there is no live trading under v3.0.
 
 ## Dependencies
-- [05-execution.md](05-execution.md) is complete. The pipeline has live and paper paths, audit is working, every stage emits records.
 
-## Parallelism
-- 9.1, 9.2, 9.3, 9.4 are largely independent after scaffolding is chosen. 9.2 is the blocker for any live activity.
+[03-council.md](03-council.md) complete; the pipeline produces archived Patterns end-to-end.
 
 ---
 
-## 9.1 Three panes — **[M]**
+## 5.1 Weekly pane — **[M]**
 
-> Build an operator-facing CLI or TUI (recommend Textual or a simple Flask+HTMX localhost app — whichever keeps shipping velocity high) with three panes per [../methodology/07-operator-workflow.md](../methodology/07-operator-workflow.md):
+> Build a CLI or simple localhost TUI. The weekly view:
+> - **Cycle log**: this week's Discover cycles, Patterns proposed, stage reached, archived count.
+> - **New archive entries**: browsable list. Each shows `pattern_id`, `spec_ref`, `assertion`, `scope`, `observation_window`, EmpiricalTest verdict, council vote summary; click for full provenance chain.
+> - **Invariant failures**: read-only.
+> - **Envelope status**: `$_spent / $B`, projected runway, ack button.
+> - **Bias-log textarea**: prompt *"Any moment this week the operator was tempted to override the pipeline? If nothing to note, write 'none'."* Empty submission refused.
 >
-> ### Daily pane
-> - Kill-switch state (big, obvious, colored).
-> - Un-ack'd pipeline errors (any stage that failed its invariant).
-> - Envelope overrun flags on `E_ops`.
-> - Retire events since last check (read-only — note, do not second-guess).
-> - Execute queue clearance: green / amber / red per [../methodology/07-operator-workflow.md](../methodology/07-operator-workflow.md) daily cycle.
->
-> Every operator action here writes an Operator record (daily-heartbeat category) to audit.
->
-> ### Weekly pane
-> - Retire-review queue: each Retire record summarized, with the trigger field prominent. Operator confirms *the trigger fired correctly* — no override of the retirement itself.
-> - Graduate-approval queue: gate-check only. Display should show **which gates fired**, not the rule's rationale or grounding narrative. Showing narrative invites re-evaluation, which is §7.
-> - Paper-deploy status summary.
-> - Meta-pane: meta-validation tally populating? calibration + discrimination signals?
-> - Bias-log prompt (see 9.4).
->
-> ### Quarterly (M2a) pane
-> - Architecture-diff viewer (read Review records from [../methodology/09-audit.md](../methodology/09-audit.md) §"Architecture records").
-> - Meta-validation result (from [02-discovery-loop.md](02-discovery-loop.md) §4.3).
-> - Council membership review (independence audit classification, per-member calibration from [03-council.md](03-council.md) §5.4).
-> - Partition re-declaration form: `E_cap` / `E_ops` / `E_res`, per-rule-clock defaults.
-> - Tax-model recalibration report.
-> - Clock-health snapshot: `t/T`, `spent/$B`, live rules, paper-deploys, graduated. Per live rule: per-rule-clock remaining; during sim phase, months-to-`K_live` in sim; during Phase 11, current `live_fraction` + position on ramp schedule + (post-ramp) months-to-`K_live_real`.
-> - Bias-log period review (reads all weekly bias entries since last M2a).
+> Every action writes an Operator weekly record per [../methodology/09-audit.md](../methodology/09-audit.md).
 
-## 9.2 Kill switch — **[S]**
+## 5.2 Archive browser — **[M]**
 
-> Implement a kill switch accessible from the daily pane AND from a CLI command (so the operator can hit it from any terminal, including degraded-network conditions). State is a single atomic file with a mandatory `reason` string on every state change. Execute ([05-execution.md](05-execution.md) §8.2) reads this on every submit and every market-data tick. Every toggle is logged to audit per [../methodology/09-audit.md](../methodology/09-audit.md) §"Operator records" (kill-switch-toggle category).
+> Read-only browser over the Pattern corpus. Filterable by `spec_ref`, `scope`, archive date, re-replication status. Detail view shows full body, observation window, EmpiricalTest report, council votes (rationales redacted from operator UI to prevent contagion — available in audit log for the M2a Council bias-log review).
 >
-> During the sim clock (all rules at `live_fraction = 0`), the kill switch halts simulated order submission and triggers `X` on simulated positions. During Phase 11, it additionally halts the real route and calls `X` on real positions. Same code path for both routes, same discipline — practicing the switch on the sim is what makes it reliable when real money is wired in.
+> The UI must not contain any "remove from archive" or "annotate as wrong" affordance. If a Pattern fails re-replication, the system appends an annotation; the operator does not.
 
-## 9.3 Heartbeat + degraded mode automation — **[M]**
+## 5.3 M2a pane — **[M]**
 
-> Implement `heartbeat/`:
+> Quarterly view:
+> - Architecture-diff viewer (read M2a Architecture records).
+> - Meta-validation result from EmpiricalTest's meta-validation (null-op early in the clock).
+> - Council membership review: independence audit classification, per-member calibration.
+> - Anti-pattern list track record.
+> - Bias-log drift report (produced by a Council instance — operator reads the report, not raw entries).
+> - Clock-health snapshot: `t/T`, `$_spent/$B`, archive count, re-replicated count, originality-cleared count, projection vs. `N_min`.
 >
-> - Requires an operator ack on the daily pane. Clock-based inference (weekend, known holiday) **does not** count as a heartbeat — an explicit ack is required on every business day.
-> - After `N` consecutive missed days (initial `N=5`, config-driven), trigger degraded mode per [../methodology/07-operator-workflow.md](../methodology/07-operator-workflow.md) §"Degraded mode":
->   1. Auto-close all live positions via each rule's `X`, or fallback to broker market-close-next-session if `X` is not immediately firable.
->   2. Halt Propose / Screen / Validate / Council / Paper-deploy / Graduate stages.
->   3. Keep Ingest / Represent / Audit running so no data is lost.
-> - On operator return, require an explicit "audit-gap ack" (operator reviews the gap period's audit records and acknowledges) before any stage past Audit re-runs. After ack, a full weekly cycle is forced regardless of day-of-week. Live re-deployment requires a full Propose → Graduate passage for every previously-live rule — nothing is simply "un-paused."
->
-> Degraded mode is safe by default and deliberately expensive to exit (to deter overuse).
+> Consult-only. Architecture changes are all-or-nothing accept/reject of Council's diff.
 
-## 9.4 Bias log — **[S]**
+## 5.4 Bias log — **[S]**
 
-> Implement a single-textarea "weekly bias log" form on the weekly pane. Entry is one line per week: any moment the operator was tempted to override the pipeline (override a Retire, cherry-pick a rule to Graduate, resize a position, propose an edge from outside reading). Logged to audit as an Operator record (weekly-review category, `bias_log_entry` field).
+> Implement the textarea on the weekly pane (5.1). One line per week, free text. `none` is required if nothing to note; empty refused. Logged as an Operator weekly record.
 >
-> This log is a §7 defense — the log is reviewed at M2a by a Council instance, not by the operator. A Council instance reading the bias log can spot patterns of drift the operator cannot self-diagnose. Include a prompt hint on the form: *"If nothing to note this week, write 'none' — empty submissions are treated as a missed log, not as 'nothing happened.'"*
+> Reviewed at M2a by a Council instance, *not* the operator. The Council reading is itself audited.
 
 ---
 
-## Exit criteria for this phase
+## Exit criteria
 
-- Full daily cycle (per [../methodology/07-operator-workflow.md](../methodology/07-operator-workflow.md)) runs in ≤ 15 minutes on the daily pane without needing any CLI outside the pane (kill-switch CLI is a backup, not a daily path).
-- Heartbeat miss test: fake `N+1` missed days in a test environment, confirm degraded mode triggers exactly as specified and that recovery requires the documented ack sequence.
-- Operator actions that could re-insert judgment (Retire override, Graduate reject-despite-gates-green, manual resize) are **not available** in the UI. If they exist in the code, remove them — the UI must not make §7 violations easy.
-- Weekly bias-log prompt has shipped at least one entry to audit in a test run; M2a pane can read the log.
+- Weekly cycle runs in ≤ 30 minutes on the pane without leaving it.
+- Archive browser is genuinely read-only (static-analysis test enforces no edit/remove affordances).
+- An attempted content-shaped suggestion in Discover's co-research interface is mechanically rejected with a logged `shape_classification: flagged` entry; the UX displays its log.
+- Bias log refuses empty submissions.
+- M2a pane reads bias-log drift reports correctly and surfaces clock health.

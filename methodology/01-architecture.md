@@ -1,96 +1,56 @@
 # §6.1 Architecture
 
-## Status
-Initial hypothesis under M2. Subject to scheduled revision at M2a. The names below are chosen for function. Where a name collides with an inherited term, the collision is coincidental; the invariants are what bind.
+Initial hypothesis under M2. Names refer to functions, not inherited categories.
 
 ## Shape
-A directed acyclic graph of **stages**. Each stage is a typed, versioned node with exactly:
-- A set of input artifacts (content-addressed).
-- A set of output artifacts (content-addressed).
-- An invariant — a measurable property its outputs must satisfy.
-- A cost ceiling (LLM, compute, data) that the stage must not exceed per unit of work.
 
-A stage must not read any un-logged input. Every input is either the output of another stage or an artifact in the append-only raw store (see [02-data-and-representation.md](02-data-and-representation.md)).
+A directed acyclic graph of **stages**. Each stage is a typed, versioned node with: input artifacts (content-addressed), output artifacts (content-addressed), an invariant, and a cost ceiling. A stage must not read any un-logged input.
 
 ## Stages
 
 ### Ingest
-- **In**: raw data from §2-admissible sources (retail-accessible).
-- **Out**: append-only, provenance-tagged, content-addressed raw store entries.
-- **Invariant**: an entry's hash equals the hash of its bytes; provenance (source, fetch time, vendor-supplied timestamp) is present; no overwrite.
+- **In**: §2-admissible raw data.
+- **Out**: provenance-tagged raw store entries.
+- **Invariant**: entry hash equals bytes hash; provenance triple present; no overwrite.
 
 ### Represent
-- **In**: raw store entries; a **feature-family spec** emitted by Propose (features are AI proposals under M3).
-- **Out**: feature tensors keyed by entity and time, lineage-tracked back to specific raw entries and the spec version.
+- **In**: raw store entries; a feature-family spec emitted by Discover.
+- **Out**: feature tensors keyed by entity and time, lineage-tracked back to raw entries and spec version.
 - **Invariant**: recomputing from lineage reproduces byte-identical outputs.
 
-### Propose
-- **In**: (a) structured slices of recent feature tensors and raw store entries; (b) the current **anti-pattern list** (see [03-discovery-loop.md](03-discovery-loop.md)); (c) the current live-rule book.
-- **Out**: candidate rules `R = (C, A, H, X)` each with an explicit **grounding** `G(R)` — an empirical signature claimed to be exploited.
-- **Invariant**: every proposed rule has executable `C`, `A`, `X`; `G(R)` is reducible to a computable statistic over the raw store.
+### Discover
+- **In**: data slices; current anti-pattern list; current archive (for novelty); operator co-research inputs (tool requests / red-team requests only — see [../Objective.md](../Objective.md) §4).
+- **Out**: candidate Patterns `(spec_ref, assertion, scope, observation_window, replication_protocol)` with executable assertions.
+- **Invariant**: every emitted Pattern's assertion is computable from raw-store inputs and reproducible byte-identically; observation window is frozen and folded into `pattern_id`.
+- **Implementation**: tool-using agent loop. Single-shot prompting is insufficient. See [03-discovery-loop.md](03-discovery-loop.md).
 
-### Screen
-- **In**: candidate rules from Propose.
-- **Out**: candidates that pass a cheap held-out evaluation (pass/fail + statistics).
-- **Invariant**: Screen uses a disjoint time window from any window used by Validate; Screen spend per candidate is bounded to a hard dollar cap.
-
-### Validate
-- **In**: Screen survivors.
-- **Out**: per-rule validation report (per [04-validation.md](04-validation.md)) with a distribution of out-of-sample utility, competitor comparison, and robustness checks.
-- **Invariant**: no data point used in any Screen window for this rule appears in any Validate window.
+### EmpiricalTest
+- **In**: candidate Patterns from Discover.
+- **Out**: replication report (verdict + robustness profile across pre-committed held-out windows). See [04-empirical-test.md](04-empirical-test.md).
+- **Invariant**: no data point used in observation window appears in any replication window for the same Pattern.
 
 ### Council
-- **In**: Validate outputs + grounding + sampled raw-data slices.
-- **Out**: votes and written rationales from ≥2 independent vendor families per [05-council.md](05-council.md); a **deploy decision** iff ≥2 independent approvals.
-- **Invariant**: a Council decision is reproducible from the logged inputs and the decision rule; rationales are stored verbatim.
+- **In**: EmpiricalTest reports + Pattern objects + sampled raw-data slices.
+- **Out**: votes and rationales from ≥ 2 measurably-independent vendor families per [05-council.md](05-council.md); archive decision iff ≥ 2 independent approvals.
+- **Invariant**: decision reproducible from logged inputs and the decision rule; rationales stored verbatim.
 
-### Paper-deploy
-- **In**: Council-approved rules.
-- **Out**: a live paper-trading instance with fractional sizing per [06-sizing-risk-portfolio.md](06-sizing-risk-portfolio.md), emitting a time-series of realized outcomes.
-- **Invariant**: paper-trading reads the same data feed as Execute, including the same latency characteristics, so realized paper outcomes are comparable to live outcomes.
-
-### Observe
-- **In**: realized outcomes from Paper-deploy and Execute.
-- **Out**: distribution-match statistics (realized vs. predicted), correlation of this rule's P&L with other live rules, drawdown metrics.
-- **Invariant**: Observe never edits predictions; it only compares realized to the frozen Validate distribution.
-
-### Graduate
-- **In**: Paper-deploy outcomes that pass the match criterion.
-- **Out**: a live-capital deployment instance sized per [06-sizing-risk-portfolio.md](06-sizing-risk-portfolio.md).
-- **Invariant**: graduation requires that Observe reports distribution-match above a pre-committed threshold over a pre-committed paper-trading duration.
-
-### Execute
-- **In**: graduated rules.
-- **Out**: broker orders and fills.
-- **Invariant**: every order references exactly one rule's current `A` under `C` evaluated at order time; every fill is logged; no order bypasses the rule.
-
-### Retire
-- **In**: any live or paper-deploy rule that breaches a retirement trigger (drawdown, Observe distribution mismatch, per-rule clock expiry, Council re-review failure).
-- **Out**: a final Retire record; open positions closed per `X` or an explicit retirement exit policy.
-- **Invariant**: retirement is monotone — once retired, a rule cannot re-enter live without new Propose/Screen/Validate/Council passage.
+### Archive
+- **In**: Council-approved Patterns.
+- **Out**: append-only corpus entry — Pattern body, observation window, replication report, council votes, all upstream artifact hashes.
+- **Invariant**: archive is append-only. A Pattern that fails future re-replication is *annotated*, not removed.
 
 ### Audit
-- Spans all other stages. Writes append-only JSON records per [09-audit.md](09-audit.md).
-- **Invariant**: for every state transition in every other stage, exactly one Audit record exists.
+- Spans every other stage. Append-only JSON Lines. Per [09-audit.md](09-audit.md).
+- **Invariant**: for every state transition in every stage, exactly one Audit record exists.
 
 ### Review (M2a)
-- **In**: Audit records since last Review; Observe statistics; the current architecture.
-- **Out**: a proposed architecture diff, red-teamed by a disjoint Council instance, executed or rejected with rationale.
-- **Invariant**: architecture is frozen between Reviews; out-of-cycle changes require a documented trigger event (drawdown breach, M8 relax path, or kill-switch restart).
+- **In**: Audit records since last Review; archive growth and replication statistics; current architecture.
+- **Out**: architecture diff red-teamed by a disjoint Council instance; executed or rejected with rationale.
+- **Invariant**: architecture frozen between Reviews.
 
 ## Hard cross-stage invariants
 
-1. **Cost gating.** Frontier-model calls are gated behind cheaper-model or purely-statistical filters whenever such a filter exists. This is enforced by per-stage cost ceilings, not by operator discretion. Rationale: `$B` envelope pressure (see [08-falsification-clock.md](08-falsification-clock.md)).
-2. **No retroactive reads.** A stage's output at time `t` must be reproducible from inputs available at `t`. Backfilling a feature spec invalidates all downstream outputs and forces re-run.
-3. **Single kill switch.** Execute obeys an external operator kill signal; when set, Execute refuses new orders and calls `X` on live positions. Paper-deploy and upstream stages continue so Retire still resolves gracefully.
-4. **Degraded mode.** If the operator heartbeat is absent for N days (see [07-operator-workflow.md](07-operator-workflow.md)), Execute auto-closes and Paper-deploy/Graduate halt until operator returns and acknowledges the audit gap.
-
-## Non-stages (deliberately absent)
-
-- No "model zoo" or "factor library." Persisting such an object across M2a cycles would become a taxonomy (M1).
-- No separate "research" stage distinct from Propose. A distinction between "research" and "discovery" would reintroduce a human-curated intermediate category.
-- No fixed universe definition. The universe a rule operates on is part of `C`.
-
-## Revision triggers
-- Scheduled: every M2a.
-- Unscheduled: drawdown breach, M8 relax path invocation, council failure to reach independence threshold ([05-council.md](05-council.md)), or per-rule clock systematically under-predicting retirements.
+1. **Cost gating.** Frontier-model calls gated behind cheaper filters whenever such a filter exists. Enforced by per-stage cost ceilings.
+2. **No retroactive reads.** A stage's output at time `t` must be reproducible from inputs available at `t`.
+3. **Operator-input audit.** Every co-research input is logged at the same fidelity as an LLM prompt; inputs that violate §4's shape are flagged at M2a.
+4. **Degraded mode.** Heartbeat absent for `N` days → Discover halts; Ingest/Represent/Audit continue; no data lost.

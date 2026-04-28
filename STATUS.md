@@ -4,67 +4,111 @@ Cross-thread memory for the manager role. `plan/` is the authoritative task list
 this file tracks what is merged, decisions not visible in `git log`, and items
 carried forward.
 
-## Phases
+## Scope as of 2026-04-28
 
-- [x] **Phase 0** — operator decisions. `config/envelope.yaml` committed (HK NRA via IBKR; Polygon / EDGAR / FRED shortlisted; no US-HK tax treaty noted).
-- [x] **Phase 1.1–1.3** — `rawstore/`, `audit/`, `access/`.
-- [x] **Phase 1.4** — `pipeline/` Stage + DAG shell, invariants, cost ceilings, cache-hit-no-audit exit criterion.
-- [x] **Phase 2.1** — Ingest adapter. Operator restricted scope to one keyless vendor (SEC EDGAR submissions) instead of the plan's 2–4 suggestion.
-- [x] **Phase 2.2** — feature-family spec runner (`represent/`). Canonical-JSON spec with registered-op DAG; 12 primitive ops; `op_version` folded into `spec_id`; in-memory `SpecRegistry`; `RepresentStage` reads only through `access` layer; byte-identical repro + no-wall-clock + no-direct-rawstore-import tests.
-- [x] **Phase 2.3** — LLM-as-feature harness. Adds `llm_call` primitive op; cached write-through into `rawstore` keyed by `(model_id, prompt_hash, params_hash)`; `CostDrift` audit category for realized-vs-declared drift. Qwen-plus via OpenAI-compatible API as the single provider (temp=0, no streaming, no tool-use); `openai` added as a dep. Tests are fixture-only — no live network.
-- [x] **Phase 3.1** — `rule/` module. `Rule` as pure data + executor (not a `Stage`). Canonical-JSON `(context, exit)` DAGs over two registered-op tables (`predicate_ops`, `exit_ops`) with per-node `op_version` folded into `rule_id`. `Action` is a flat dataclass (no DAG). `Grounding` is a closed-enum of three assertion kinds (`in_range` / `quantile_ge` / `sign`) with a frozen `(t0, t1)` window folded into `rule_id`. `Rule.evaluate(t, access, specs)` = context-only bool; `Rule.simulate(window, ...)` = frictionless single-instrument state machine over a rule-carried `price_spec_ref`.
-- [~] **Phase 3.2** — `propose/` is implemented as a two-pass LLM `Stage` with schema validation, cheap-pass budget gating, adjudication, LLM cache/audit payloads, prompt guardrails, and fixture-only tests. Verified from commit `f349927`. Remaining hardening: call `Rule.evaluate(...)` during generation and verify grounding computability against data, not only candidate shape.
-- [~] **Phase 3.3** — `originality/` implements empty seeding, mechanical matcher-based reducibility, bounded/stale anti-pattern state, M2a empty-on-failure behavior, audit records, and tests. Verified from commit `9cd098a`. Remaining gap: automatic anti-pattern entry creation from measured out-of-sample rule history is not implemented.
-- [x] **Phase 3.4** — `screen/` module. `ScreenStage` evaluates candidate rules over a held-out Screen window using `Rule.simulate(...)`, config-driven thresholds, per-candidate cost caps, turnover/cost consistency, and grounding reproducibility on the Screen window. `access/` now has a persistent window-reservation ledger so future Validate reads for the same `rule_id` are refused when they overlap Screen windows.
-- [x] **Phase 4.1** — `validate/` module. `ValidateStage` runs per Screen survivor, rechecks Screen/Validate disjointness with `AccessLayer.assert_window_available(...)`, reserves Validate windows, emits distribution-shaped reports with neutral challengers, and writes Validate audit payloads with config hash, windows, disjointness proof, challenger reports, robustness profile, and partition profile. Validation protocol parameters live in `config/validate.yaml`.
-- [x] **Phase 4.2** — `partitions/` module. Deterministic numpy-only partition assignment derivation over registry/access-read state summaries, canonical `partition_0...` tags, statistical fingerprints, config-hashed artifacts, and Validate partition-aware challenger dominance via `partition_assignment_hash`. Parameters live in `config/partitions.yaml`.
-- [x] **Phase 5.1** — `council_llm/` multi-vendor voter wrapper. `CouncilVoterStage` accepts a versioned member config + injected LLM client, redacts Propose rationale/model metadata from prompts, runs screening before full review, returns `(vote, rationale, citations)`, caches by `(rule_hash, validate_report_hash, member_version)`, and audits Council vote records with prompt/response hashes, member id/version, cache status, vote, rationale hash, citations, and cost usage. Tests are stub-client only; `uv run pytest -q` passed (232 tests).
-- [x] **Phase 5.2** — `council_decide/` aggregate decision stage. Consumes Council vote records plus a minimal independence classification (`member_id -> independent_group_id`), requires ≥2 approving independent groups, treats any rejecting independent group as blocking, collapses same-group members into one voice, and audits the aggregate decision with candidate rule id/hash, Validate report hash, decision-rule id/hash, member vote summaries, independent group outcomes, blocking rationales, and final route. `uv run pytest -q` passed (239 tests).
-- [ ] **Phase 5.3+** — see `plan/03-council.md` onward.
+The project pivoted from "AI-native alpha-discovery-to-execution" (Objective.md v2.1) to "frontier-AI pattern-discovery system" (Objective.md v3.0). The corpus of council-approved, replication-tested Patterns is the artifact; trading is out of scope.
+
+### Cleanup executed (2026-04-28)
+
+Two-phase cleanup. The first phase removed v2.1's deployment-half modules; the second phase removed the trading-shaped discovery scaffolding so the rebuild starts from a clean foundation rather than refitting v2.1 vocabulary into v3.0 names.
+
+**Phase-1 deletions (deployment half):**
+- Modules: `screen/`, `validate/`.
+- Configs: `config/screen.yaml`, `config/validate.yaml`.
+- Methodology: `04-validation.md`, `06-sizing-risk-portfolio.md`.
+- Plan: `04-lifecycle-and-sizing.md`, `05-execution.md`, `07-go-live.md`.
+
+**Phase-2 deletions (trading-shaped discovery):**
+- Modules: `rule/` (Rule = `(C, A, H, X)`, trading-encoded), `propose/` (single-shot prompt, wrong design — see prior conversation), `originality/` (consumed `Grounding` from `rule/`), `council_llm/` (typed on `Rule + ValidationReport`), `council_decide/` (built on `council_llm` types).
+- Tests for each of the above.
+- Config: `config/propose.yaml`.
+- Caches: `.pytest_cache/`, `.hypothesis/`, all `__pycache__/`.
+
+The phase-2 deletions cascade from `rule/`. Refitting them piecewise would have left v2.1 vocabulary (`Grounding`, `validate_report`, `rule_id`) in the new codebase. Rebuilding clean produces `Pattern`, `empirical_test_report`, `pattern_id`.
+
+### Doc rewrites under v3.0
+
+- `Objective.md` — terminal goal is now archive-rate, not P&L. §0 was relaxed from "no imports at all" to §0a "operator does not target."
+- `methodology/README.md`, `01-architecture.md`, `02-data-and-representation.md`, `03-discovery-loop.md`, `05-council.md`, `07-operator-workflow.md`, `08-falsification-clock.md`, `09-audit.md` — rewritten or trimmed.
+- `methodology/04-empirical-test.md` — new file; replaces v2.1 Validation with assertion-replication on held-out windows.
+- `plan/README.md`, `00-operator-decisions.md`, `01-foundation.md`, `02-discovery-loop.md`, `03-council.md`, `06-operator-ux.md` — rewritten.
+
+## Current code state
+
+### Surviving modules (foundation, no trading-shaped vocabulary)
+
+- `rawstore/` — content-addressed, append-only, hash-keyed bytes + provenance index.
+- `audit/` — append-only hash-chained JSONL, daily rotation, cross-day continuity.
+- `access/` — capability-narrowed read layer; only path Discover/EmpiricalTest/Council may use to read raw bytes.
+- `pipeline/` — `Stage` base class with cost ceilings and invariant assertions; `PipelineDAG` orchestrator.
+- `ingest/` — SEC EDGAR submissions adapter (one keyless source).
+- `represent/` — feature-family spec runner with content-addressed `spec_id` and LLM-as-feature `llm_call` op.
+- `partitions/` — partition-tag derivation from raw-store state summaries.
+
+### Surviving tests
+
+- `tests/test_rawstore.py`, `test_audit.py`, `test_access.py`, `test_pipeline.py`, `test_ingest_edgar.py`.
+- `tests/represent/` — spec, runner, guardrails.
+- `tests/partitions/` — partition derivation, no-rawstore-import guardrail.
+
+### To-rebuild modules (planned, not yet built)
+
+- `pattern/` — replaces `rule/`. `Pattern = (spec_ref, assertion, scope, observation_window, replication_protocol)`. No trading vocabulary. (Phase 3a.)
+- `discover/` — replaces `propose/`. Tool-using agent loop with a fixed tool surface (`inspect_spec`, `compute`, `propose_spec`, `test_assertion`, `submit_pattern`). (Phase 3b.)
+- `empirical_test/` — replaces `validate/`. Assertion replication on held-out windows + perturbation controls. (Phase 3c.)
+- `originality/` — rebuilt against Pattern fingerprints (matcher API survives in spirit). (Phase 3d.)
+- `council_llm/` — rebuilt with `(pattern, empirical_test_report, raw_slice)` input contract. (Phase 4.1.)
+- `council_decide/` — rebuilt routing to Archive instead of Paper-deploy. (Phase 4.2.)
+- `independence/` — new module, Phase 4.3.
+- `council_calibration/` — new module, Phase 4.4.
+- `archive/` — new module for Pattern corpus persistence + browser. (Phase 5.)
+
+## Phases under v3.0 plan
+
+- [x] **Phase 0** — operator decisions. `config/envelope.yaml` exists from v2.1 and still has trading-capital fields; flagged below for re-trim before next config change.
+- [x] **Phase 1.1–1.4** — `rawstore/`, `audit/`, `access/`, `pipeline/` (Stage + DAG). All survive.
+- [x] **Phase 2.1–2.3** — Ingest (EDGAR), `represent/`, LLM-as-feature. All survive. Phase 2.3 §0a clarification: prompts in LLM-as-feature specs must be *extraction* prompts, not *suggestion* prompts.
+- [x] **Phase 4.2 (partitions module)** — `partitions/` survives.
+- [ ] **Phase 3a** — Pattern object (rebuild from clean).
+- [ ] **Phase 3b** — Discover stage as tool-using agent loop. Largest single piece of remaining work; needs research thread before coding.
+- [ ] **Phase 3c** — EmpiricalTest stage.
+- [ ] **Phase 3d** — Originality filter rebuilt against Pattern fingerprints.
+- [ ] **Phase 4.1** — Council voter wrapper rebuild.
+- [ ] **Phase 4.2** — Council decision rule rebuild.
+- [ ] **Phase 4.3** — Independence audit (research-heavy).
+- [ ] **Phase 4.4** — Calibration test.
+- [ ] **Phase 5** — Operator UX.
 
 ## Decisions not obvious from `git log`
 
-- **2.1 single-vendor scope**: operator chose one adapter, keyless only. Retail price data (Polygon / Alpaca / IBKR) all require at least a free key and were deferred. This must be revisited before Phase 10 — the forward sim clock needs real price data.
-- **`Stage.audit_extra_payload()` hook** (added in Phase 2.1): lets stage subclasses inject category-specific fields into the Stage audit record per methodology §9. Required by Ingest's field list; will also be needed by Represent, Propose, Council, Validate, etc. Backwards-compatible (default returns `{}`). Not a one-off. Represent (2.2) uses it to emit `spec_version`, `declared_cost`, `cost_used`, `hashes_read`, and output dtype/shape.
-- **Spec format chosen in 2.2**: registered-op DAG, canonical-JSON body, `spec_id = sha256(canonical_json(body))` with per-node `op_version` folded into the hash input. Specs are data, not code — Phase 3 Propose emits them programmatically with no feature files on disk. Read path: `raw_get` is the only op that talks to `ctx.access`; all other ops are pure. `represent/` imports nothing from `rawstore` (AST-enforced in tests). Added `numpy` as a runtime dep (first one).
-- **2.3 deferred deliberately**: bundling would have doubled 2.2 scope (response write-back into rawstore, prompt-hash provenance, cost-drift monitor). The primitive-op registry was designed so adding `llm_call` is drop-in.
-- **2.3 provider choice**: operator picked Qwen via OpenAI-compatible API (`qwen-plus`), reading `OPENAI_API_KEY` + `OPENAI_API_BASE` from env. This sidesteps the Anthropic/OpenAI corpus-independence question for the later council protocol — Qwen is a third training corpus, so neither lane is pre-committed. Real client: `represent.llm_client.QwenOpenAICompatibleClient`. Tests use `StubLLMClient` exclusively.
-- **2.3 write-path shape**: new `access.RawStoreWriter` sibling to `AccessLayer`, same closure pattern for capability hiding, single narrow method `put_llm_response(...)`. Threaded into `StageContext.writer` symmetric with `.access`. `represent/` still imports nothing from `rawstore` — guardrail test extended and green.
-- **2.3 cache index**: new `llm_cache` sqlite table inside `RawStore` keyed by `(model_id, prompt_hash, params_hash) → bytes_hash`. `AccessLayer.lookup_llm()` returns the bytes-hash or `None`; the subsequent `access.get(bytes_hash, query_time)` still enforces temporal admissibility, so a future-dated cached response is denied on read even though the cache hit resolves. Cache lookups count toward the per-cycle read budget.
-- **2.3 mode split**: `llm_call.run()` is one function with an internal branch. Miss → call `LLMClient`, canonicalize full response into JSON envelope, write via `writer.put_llm_response()` (verified by `put()`'s return value, not by a subsequent read). Hit → read cached envelope via `access.get()`, extract text + token counts. Only the miss branch does network; every re-run under pytest is the hit branch.
-- **2.3 deps envelope**: `_validate_declared_deps` relaxed to skip `llm_call` nodes (cache bytes-hash is unknown at spec-authoring time). `raw_get` envelope enforcement unchanged. `outputs.input_hashes` union includes both `raw_get` hashes and `llm_call` cache bytes-hashes for full lineage capture. Test asserts an `llm_call` cache hash not in `spec.deps` validates while a `raw_get` hash not in `spec.deps` still fails.
-- **2.3 cost-drift**: new audit category `CostDrift` (sibling of `Represent` record, not a payload flag). Emitted per drifted llm_call node per run when `realized_usd / declared_cost_usd > 1 + cost_tolerance` (default tolerance 0.20). Fires on both miss and hit runs (hit-mode realized cost comes from the cached envelope's token counts). Price table lives in `represent/pricing.py` with qwen-plus placeholders; numbers need operator confirmation before Phase 3.
-- **3.1 DSL shape**: two DAG registries, not three. `predicate_ops` = {`spec_ref`, `literal`, boolean combinators, binary comparisons, arithmetic}. `exit_ops` is a superset with three position-state accessors: `time_since_entry`, `realized_pnl`, `context_still_holds`. Action is a flat dataclass `{side ∈ {long, short, cash}, size_multiplier}` + a module-level `action_schema_version` int folded into `rule_id` (decision: a two-field dataclass doesn't warrant DAG machinery and every extra op name is a §0 vector). Predicate/exit DAG roots are statically type-checked to bool at `finalize_rule` time — any non-bool-rooted DAG is rejected before the rule exists.
-- **3.1 hash contract**: `rule_id = sha256(canonicalize(body))` via `audit.canonicalize`. Folded into the canonical body: every DAG node's `op_version`, `action_schema_version`, `cadence.step_seconds`, `grounding.window` (t0, t1), `grounding.spec_ref`, `price_spec_ref`. Mirrors `represent/spec.py::_compute_spec_id`. Byte-identical rehydration and op_version-drift tests pass. This is the contract council caches (Phase 5) will key on.
-- **3.1 simulate scope**: frictionless, single-instrument per rule, `cadence.kind == "fixed_step"` only. State machine is `flat ↔ in_position`; while in_position, C is NOT re-checked as an open-signal (it can still be referenced via `context_still_holds()` inside X). `Trade` carries `exit_reason ∈ {"horizon", "exit_predicate"}`. `action.side == "cash"` short-circuits to empty trade list. Friction/turnover/slippage belong to Screen (Phase 3.4), not here.
-- **3.1 grounding**: closed enum. `in_range(lo, hi)` checks the realized MEAN over the window; `quantile_ge(p, threshold)` checks the p-quantile; `sign(expected_sign)` checks the realized mean's sign with `ZERO_MEAN_TOLERANCE = 1e-12` (a numerical-precision zero, not an economic-significance zero — see carried-forward flags). The `(t0, t1)` window is frozen at rule creation and folded into the hash, so moving the window produces a different rule_id.
-- **3.1 §0 guardrails**: `tests/rule/test_op_names_primitive.py` hardcodes a per-registry allowlist (drift visible in diffs) + a blocklist token grep over all `rule/*.py` (`momentum, reversion, value, quality, carry, trend, breakout, pair, arbitrage, alpha, beta, premium, anomaly, signal, factor, strategy, edge, pattern, regime, ticker, sector, macro, earnings`). `Rule` has no free-text field (no `description`, `rationale`, `notes`, `label`, `name`) — rationale lives in Propose records, not on the object. AST test enforces `rule/` imports nothing from `rawstore`; wall-clock test enforces no `time.time`/`datetime.now` in `rule/`.
-- **5.1 Council cache/audit exception**: Council deliberately overrides the base `Stage.run()` cache-hit behavior. Base stages avoid audit on artifact hits, but Phase 5.1 requires Council vote records to include cache status, so `CouncilVoterStage` appends a Council audit record on both miss and hit. The cache fingerprint is exactly the required content key `(rule_hash, validate_report_hash, member_version)`; `raw_slice` is included in prompts and audit hashes but not in the cache key.
-- **5.1 client boundary**: `council_llm/` defines the member/voter wrapper but does not instantiate live vendor clients. Production callers inject clients implementing `represent.llm_client.LLMClient`; tests use local recording stubs only. This keeps Phase 5.1 free of live network calls.
-- **5.1 redaction boundary**: Council prompt construction sanitizes nested input payloads by dropping Propose rationale/model fields (`free_text_rationale`, `model_version`, `candidate_audits`, `llm_calls`, proposer/model aliases, etc.). Guardrail tests assert `council_llm/` has no direct `rawstore` or `propose` imports and that secret Propose rationale/model values do not appear in prompts.
-- **5.2 independence input contract**: until Phase 5.3 ships the measured audit, `council_decide/` accepts only the minimal future contract: `classification_id` plus `member_groups = {member_id: independent_group_id}`. Every voting member must be classified; missing groups are an error rather than defaulting a member to independent.
-- **5.2 collapsed-group mechanics**: an `independent_group_id` is one Council voice. If any member in the group rejects, the group voice is `reject` and blocks approval; otherwise one or more approvals in that group count as exactly one approving voice. Aggregate audit payloads include reject rationales only as `blocking_rationales`; approval rationales remain referenced by hash in member summaries.
+- **2026-04-28 scope pivot**: trading is out of scope (Objective.md v3.0). The discovery half of the system survives; the deployment half was deleted. §0 simultaneously relaxed from "absolute import prohibition" to §0a "operator does not target" because the strict reading was self-undermining and unenforceable.
+- **2026-04-28 nuclear cleanup**: rather than refit `rule/` + `propose/` + `originality/` + `council_*/` to Pattern shape, all five modules were deleted to start clean. Justification: the v2.1 trading vocabulary (`Grounding`, `Rule`, `validate_report`) would have leaked into the rebuilt codebase under refit, and the refit work would have approached the rebuild work in size.
+- **C-first scope ladder**: the v3.0 system is the **Pattern Catalog** (option C in the prior conversation): output is a corpus of empirical anomalies/structural claims, each with a frozen fingerprint and a re-replication test. Hypothesis-with-mechanism (option A) and tool-using research-agent surfacing (option B) are *not* implemented; they are downstream extensions on top of a working C. The Discover stage is *B-shaped infrastructure (tool-using agent loop) producing C-shaped output (Patterns)* — the simplest composition that gives meaningful operator co-research without exploding the output evaluation problem.
 
-## Carried-forward flags
+## Decisions carried forward from v2.1 (still valid for the surviving modules)
 
-- Ingest adapter's `invariant()` reaches for `rawstore._issue_reader()` + `has()` to verify a just-written entry. Redundant with the `stored_hash != bytes_hash` check in `compute()`, and arguably bypasses the access-layer discipline from plan 1.3. Tighten next time `ingest/edgar/adapter.py` is opened. Add to future delegation prompts: "verify rawstore writes via `put()`'s return value, not the read API." (Reminder was included in the 2.2 delegation prompt; `represent/` does no writes, so nothing to regress.)
-- `SpecRegistry.register()` in 2.2 accepts both a finalized spec (with `spec_id`) and a raw body (auto-calls `finalize_spec`). The manager's delegation prompt said reject-if-missing, but the looser path still validates via `load_spec` and is strictly more caller-friendly. Not a correctness drift, but worth revisiting if Phase 3 Propose wants stricter provenance on what it registers.
-- Codex-worker contributions are not yet recorded in `audit/`. Per `CLAUDE.md`, build-tool provenance is out of scope until a later phase wires it; for now the audit trail is `git log` + conversation.
-- `config/envelope.yaml` → `operator.jurisdiction` has `home_country: HK` with a note that physical presence is SG. Resolve with a local tax advisor before cutover (Phase 11).
-- **Qwen pricing placeholders** in `represent/pricing.py` (`input: $0.8/M`, `output: $2.0/M`) — set to reasonable defaults but need operator confirmation against current Alibaba Cloud Qwen-plus pricing before Phase 3 runs the loop for real. Drift detection still works either way; only the dollar amounts shift.
-- **2.3 `RawStoreWriter` is not the only write path** — `RawStore.put()` remains callable directly by trusted callers (Ingest adapter). Writer is a narrow sibling for the llm_call case. If Phase 3+ wants all writes through capabilities, that's a larger refactor and should be a separate decision.
-- **Cache lookups cost one read-budget slot per llm_call node**; in hit mode the subsequent `access.get()` costs a second slot. In miss mode the writer's `charge_data_read(1)` also charges one slot (for accounting symmetry). So a single llm_call node consumes 2 slots on miss or 2 slots on hit — revisit if Phase 3 Propose hits the read budget ceiling with multi-llm_call specs.
-- **3.1 ZERO_MEAN_TOLERANCE = 1e-12** in `rule/grounding.py` is a numerical-precision zero, not an economic-significance zero. For a real price/return feature a "sign near zero" might mean |mean| < 1e-4 or 1e-3, not 1e-12. If Propose emits `sign(0)` assertions in practice, revisit whether this constant should be (a) per-assertion configurable or (b) derived from the feature's own scale. Flagged for Phase 3.2 design discussion.
-- **3.1 cadence.kind is "fixed_step" only**. Event-driven or irregular cadences (e.g., "evaluate on each filing date") would need a new cadence kind added to the allowlist. Currently forbidden by the normalizer; adding one is a deliberate §0 decision since cadence is a potential vector for practitioner-pattern leakage. Defer until Propose demonstrably needs it.
-- **3.1 Rule is single-instrument.** `price_spec_ref` is one spec_id; `simulate` returns one trade stream. Multi-instrument rules (pair trades, baskets, cross-sectional ranks) would require a new schema and are out of scope. Re-open when/if Propose needs cross-sectional logic — probably Phase 6+ when portfolio construction is in play.
-- **3.1 `SpecRegistry.register()` looseness still standing.** Phase 3.2 Propose emits specs and rules together; when it does, decide whether Propose's registered specs must be fully finalized (`spec_id` present) or can be raw bodies. Current `SpecRegistry` accepts both; `rule/` calls `registry.get(spec_id)` only, so no immediate action needed.
-- **4.1 Validate-scope collision resolved.** The unsafe named comparator wording in `methodology/04-validation.md` and `plan/02-discovery-loop.md` was replaced with neutral challengers (`inactive`, `context_removed`, `context_randomized`, `input_permuted`). Partition wording was also neutralized away from named state examples. `methodology/09-audit.md` now names `challenger_reports` and `partition_profile`.
-- **3.4 Screen reservation behavior.** `WindowReservationBook` is a small SQLite ledger under `access/`; `AccessLayer.reserve_window(... stage="Screen" ...)` records Screen windows and `AccessLayer.assert_window_available(... stage="Validate" ...)` refuses overlaps for the same rule. Screen cache hits call `ensure_window_reserved()` so artifact reuse does not silently drop the reservation in a fresh reservation store.
+- **`Stage.audit_extra_payload()` hook** — used by every surviving stage.
+- **Spec format**: registered-op DAG, canonical-JSON body, `spec_id = sha256(canonical_body_with_op_versions_folded_in)`.
+- **2.3 deps envelope**: `_validate_declared_deps` relaxed for `llm_call`.
+- **2.3 cost-drift**: `CostDrift` audit category in `represent/`.
+- **Raw store + access discipline**: `represent/` is forbidden by static analysis from importing `rawstore`. The `access` layer is the only read path. `partitions/` follows the same rule.
+- **§0 guardrail tests**: token-blocklist greps in surviving modules. Will need re-application in rebuilt modules; the v2.1 blocklist will need a small expansion as `pattern/` lands (no `rule`, `trade`, `position`, `entry`, `exit`, `pnl`, etc.).
+
+## Known issues / flags
+
+- **`config/envelope.yaml` needs re-trimming.** Still has v2.1 trading-capital, cutover, broker, tax-bracket, and routing fields. Trim to v3.0 schema (envelope, clock, data_scope, llm_families, stack) before next config change. Audit references the file's hash, so re-trimming is a clock-relevant decision.
+- **Qwen pricing placeholders in `represent/pricing.py`**: still need operator confirmation against current Alibaba Cloud pricing.
+- **`SpecRegistry.register()` looseness** (accepts both finalized spec and raw body): still valid; revisit when Phase 3b Discover starts emitting specs.
+- **Codex-worker contributions are not yet recorded in `audit/`**: deferred to a later audit-extension phase.
 
 ## Resuming in a new thread
 
-1. Read `Objective.md` §0 + §7.
+1. Read `Objective.md` v3.0 (especially §0 and §7).
 2. Read this file.
 3. Read the relevant `plan/*.md` section for the target phase.
 4. Confirm scope with operator **before** delegating anything token-heavy to `codex-coder`.
-5. After the worker returns: `git diff`, grep for §0 leakage in new names/comments, run `uv run pytest -q`, update this file.
+5. After the worker returns: `git diff`, grep for §0a leakage in new names/comments, run `uv run pytest -q`, update this file.
+
+The next planned work is Phase 3a (Pattern object, clean build) and Phase 3b (Discover stage as tool-using agent). Phase 3a is the prerequisite; Phase 3b is the single largest piece of remaining work and needs a research thread before coding begins.
+
+`uv run pytest -q` should pass cleanly on the surviving foundation. If it does not, that's an environment issue (cached imports, lockfile drift), not a code issue — every dangling import was removed in the phase-2 cleanup.

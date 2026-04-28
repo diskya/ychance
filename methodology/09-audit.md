@@ -1,103 +1,55 @@
 # §6.9 Audit Trail Specification
 
-## Status
-A specification, not a hypothesis. The audit trail exists for three reasons, in order of priority:
+A specification, not a hypothesis. The trail exists for (1) operator-discipline visibility at M2a, (2) methodology self-improvement (meta-validation, independence audits, architecture diffs all read it), (3) reproducibility (any archive entry must be reconstructable from raw data and the chain).
 
-1. **Regulatory defense**: if a regulator asks why a given trade was made, the audit trail reconstructs the full causal chain from raw data to order.
-2. **Operator discipline (§7)**: operator re-insertion is invisible without a log. The audit trail makes it visible at M2a.
-3. **Methodology self-improvement**: every meta-validation, every independence audit, every M2a architecture diff reads the audit log as its primary input.
-
-The audit trail is **append-only** and **content-addressed**. No record is ever edited. Corrections are new records referring to the original by hash.
+The trail is **append-only** and **content-addressed**. No record is ever edited. Corrections are new records referring to the original by hash.
 
 ## Storage
 
-- Append-only files, one per calendar day, JSON Lines.
-- Each line is a record with a `record_hash` (sha256 of the canonicalized line minus the hash field itself).
-- Each record has a `prev_hash` field — the hash of the previous record in the same file. This chains records; tampering with a single record invalidates every subsequent hash in the file.
-- Files are rotated at midnight UTC. End-of-file record carries the chain into the next day's first record.
-- Storage is operator-local with at least one off-site backup. Cost is part of `E_ops`.
+- One JSON Lines file per calendar day. Each line has `record_hash` (sha256 of the canonicalized line minus the hash field) and `prev_hash` (previous record's hash). Tampering invalidates every subsequent hash.
+- Files rotate at midnight UTC; an end-of-file record carries the chain into the next day's first record.
+- Operator-local with at least one off-site backup. Cost is part of `$B`.
 
-## Record categories
+## Common record fields
 
-Every record has: `timestamp`, `record_id` (UUID), `record_hash`, `prev_hash`, `category`, `stage` (one of the stages in [01-architecture.md](01-architecture.md)), `envelope` (subset of: `rule_id`, `cycle_id`, `m2a_id`), and a category-specific payload.
+Every record carries `timestamp`, `record_id` (UUID), `record_hash`, `prev_hash`, `category`, `stage`, an `envelope` (any of `pattern_id` / `cycle_id` / `m2a_id`), and a category-specific payload.
 
-### Ingest records
-- `source_id`, `vendor_timestamp`, `fetch_time`, `bytes_hash`, `bytes_size`, `provenance` (full triple).
+## Record categories (general contract)
 
-### Represent records
-- `feature_spec_version`, `input_bytes_hashes`, `output_tensor_hash`, `compute_cost`, `llm_cost` (if any).
+Each stage contributes its own category. Payloads are defined when the stage is built, but every category must include enough to fully reconstruct the stage's decision from raw-store inputs and prior records — no un-logged inputs, no silent state.
 
-### Propose records
-- `rule_id` (new), `rule_object` (full executable `(C, A, H, X)`), `grounding` (full `G(R)`), `free_text_rationale`, `model_version`, `prompt_hash`, `input_slice_hashes`, `llm_cost`.
-- **Free-text rationale is logged but withheld from Council** (see [05-council.md](05-council.md)). The log stores it; the pipeline gates do not route it.
+Currently-built categories:
+- **Ingest** — `source_id`, `vendor_timestamp`, `fetch_time`, `bytes_hash`, `bytes_size`, `provenance`.
+- **Represent** — `spec_id`, `spec_version`, `input_bytes_hashes`, `output_tensor_hash`, `compute_cost`, `llm_cost` (if any).
+- **CostDrift** — `spec_id`, `node_id`, `declared_cost_usd`, `realized_cost_usd`, `cost_tolerance`, `model_id`. Emitted on `llm_call` realized-cost overrun.
 
-### Originality-filter records
-- `rule_id`, `result` (pass / reject), `matched_anti_pattern` (if reject), `anti_pattern_list_version`.
+To-be-built categories (Discover, EmpiricalTest, Council, Archive, Operator weekly/M2a, M8 clock, Architecture) — payloads will be defined alongside their stage implementations and must satisfy the general contract above.
 
-### Screen records
-- `rule_id`, `screen_window`, `statistics` (all of them, not a summary), `pass/fail`, `compute_cost`.
+## Operator records — load-bearing under §0a
 
-### Validate records
-- `rule_id`, `validate_protocol_version`, `windows_used` (with proof of disjointness from Screen windows), `utility_distribution`, `challenger_reports`, `robustness_profile`, `partition_profile`, `compute_cost`, `llm_cost`.
+Two operator categories are defined now because they are the §7 defense and need their contract before Discover ships:
 
-### Council records
-- One record per member per rule:
-  - `rule_id`, `member_id`, `member_version`, `vote`, `rationale` (verbatim), `key_evidence_citations`, `llm_cost`.
-- Plus one **decision record** aggregating the member records: `rule_id`, `decision` (approve/reject), `independent_approver_member_ids`, `decision_rule_version`.
-
-### Paper-deploy records
-- Session-level: `rule_id`, `paper_deploy_id`, `start_time`, `end_time`, `size_function_version`.
-- Per-tick / per-firing: `rule_id`, `paper_deploy_id`, `firing_time`, `C_value` (boolean + the values `C` consumed), `A_value`, `position_after`, `paper_cost_model_version`, `realized_paper_pnl_contribution`.
-
-### Observe records
-- `rule_id`, `window`, `realized_vs_predicted_test`, `distribution_match_statistic`, `correlation_vector` (with every live rule), `partition_tag_performance`.
-
-### Graduate / Retire records
-- **Graduate**: `rule_id`, `size_allocated`, `gates_fired` (with references to the specific Validate/Council/Observe records that satisfied each gate), `operator_ack_record_id`.
-- **Retire**: `rule_id`, `trigger` (one of: drawdown, distribution-mismatch, per-rule-clock-expiry, correlation-clamp, council-rereview-failure, infeasibility), `final_position_exit`, `post_mortem_reference`.
-
-### Execute records
-- Per order: `rule_id`, `order_intent`, `broker_order_id`, `submission_time`.
-- Per fill: `broker_order_id`, `fill_time`, `price`, `quantity`, `fees`, `slippage_vs_paper`.
-- Per rejection: `broker_order_id`, `rejection_reason`, `operator_notification_time`.
-
-### Operator records
-- Daily heartbeat: `operator_id`, `timestamp`, `acknowledgments` (kill-switch state, pending queue approval, envelope touchpoint).
-- Weekly review: `timestamp`, `retire_events_reviewed`, `graduate_events_approved`, `bias_log_entry` (operator's personal near-override log entry for the week, verbatim).
-- M2a quarterly: `timestamp`, `architecture_diff_hash`, `meta_validation_result`, `membership_changes`, `partition_redeclaration`, `tax_model_recal`, `clock_health_snapshot`, `bias_log_period_review`.
-- Kill switch toggle: `timestamp`, `new_state`, `reason` (free text, mandatory, logged verbatim).
-
-### M8 clock records
-- Per clock start: `clock_id`, `T`, `$B`, `K_live`, `relax_allowance`.
-- Per relax invocation: `clock_id`, `clause_relaxed`, `rationale`, `council_approval_record_ids`.
-- Per clock exit: `clock_id`, `exit_type` (success / abandon), `success_rule_id` (if success), `abandon_action` (cash / human-curated-alternative, if abandon).
-
-### Architecture records
-- Per M2a diff: `m2a_id`, `architecture_version_before`, `architecture_version_after`, `diff`, `red_team_council_record_ids`, `decision`, `rationale`.
-- Per out-of-cycle trigger: same fields plus `trigger_event_record_id`.
+- **Weekly** — `timestamp`, `bias_log_entry` (verbatim, mandatory; `none` is a valid value, empty is not), `cycle_log_acked`, `archive_browsed_count`, `envelope_status_acked`.
+- **Co-research input** — every operator input to Discover, with `input_text`, `shape_classification` (`tool_request` / `red_team_request` / `flagged`), and the agent's response.
 
 ## Retention
 
-- **Full audit trail**: retained for the duration of the active M8 clock plus at least 2 years after the clock exits.
-- **Jurisdiction-specific extension**: whatever the operator's tax and securities regulations require as a minimum, with 2 years added for a safety margin.
-- **Raw-store bytes**: retained for the full audit-trail window. Deletion before the window ends is a discipline violation (§7) and requires operator documentation.
+- Audit trail: duration of the active M8 clock plus ≥ 1 year after exit.
+- Raw-store bytes: full audit-trail window. Deletion before is a §7 violation requiring documentation.
 
-## Audit-trail integrity checks
+## Integrity checks
 
-- **Daily**: hash chain of the current day's file is verified on daily-cycle open; a break halts Execute until resolved.
-- **Weekly**: cross-file hash continuity check.
-- **Quarterly (M2a)**: full log replay — a subset of rules is picked at random, and the pipeline is re-run from raw-store inputs to see that the same decisions emerge. Mismatches indicate either a reproducibility bug (fix it) or a pipeline that depends on an un-logged input (fix the pipeline).
+- **Daily**: hash chain verified on the day's file at the next cycle open; a break halts Discover until resolved.
+- **Weekly**: cross-file continuity check.
+- **M2a**: full log replay — a random subset of archived Patterns is re-derived from raw-store inputs. Mismatches indicate either a reproducibility bug or un-logged input. Both are defects.
 
-## What the audit trail does not store
+## What the trail does not store
 
-- No secrets in plaintext (API keys, broker credentials). Those are referenced by key-id.
-- No personally identifying material beyond the operator's own identity.
-- No third-party user data. (This methodology does not touch any.)
+API keys (referenced by key-id only); personally identifying material beyond the operator's own identity; third-party user data.
 
-## Operator-facing views of the audit trail
+## Operator-facing views
 
-- **Daily pane**: filtered to the current day's Execute, Observe, Retire, and any invariant-failure records.
-- **Weekly pane**: current week's Graduate, Retire, Paper-deploy, and Observe summaries.
-- **Quarterly pane**: per-rule lifecycle, architecture diffs, clock health, bias log compilation.
+- **Weekly pane**: this week's cycles, archived Patterns, EmpiricalTest results, invariant failures, bias-log prompt.
+- **M2a pane**: per-Pattern lifecycle since last M2a, architecture diffs, clock health, bias-log drift report, council membership audit.
 
-The operator reads these panes. The operator does not edit the trail. The trail is ground truth; if it disagrees with memory, memory is wrong.
+The operator reads. The operator does not edit. Trail is ground truth; if it disagrees with memory, memory is wrong.
