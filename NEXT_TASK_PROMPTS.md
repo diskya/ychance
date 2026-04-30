@@ -112,7 +112,7 @@ You are working in `/home/ubuntu/ychance`.
 Task: implement `discover/` from the approved design.
 
 Read:
-- The approved Discover design from Prompt 3.
+- `plan/02-discovery-loop-3b-design.md` as the implementation contract.
 - `Objective.md` §0, §4, §7
 - `methodology/03-discovery-loop.md`
 - `methodology/09-audit.md`
@@ -128,16 +128,22 @@ Implement:
 - Per-cycle cost cap enforcement.
 - Cost-tier discipline: cheaper model for tool-call iteration, frontier model only at final Pattern submission.
 - No-Pattern as a valid output.
+- Window reservation for submitted Patterns' observation and tool-touched Discover windows.
 - Tests with mocked LLM/tool calls.
 
 Constraints:
 - No direct raw-store access.
 - Do not let prompt text name target phenomena, factors, categories, or specific Pattern targets.
 - Agent rationale may be logged, but must be clearly marked as withheld from Council.
+- `submit_pattern` must require a prior successful `test_assertion` in the same cycle.
+- Cheap iteration must not be able to call `submit_pattern`; frontier submission must not be able to call exploratory tools.
 
 Verification:
 - `uv run pytest -q`
 - Tests proving cost cap, audit trace reconstruction, no-Pattern output, and input-shape rejection.
+- Static-analysis test proving `discover/` does not import `rawstore`.
+- Tests proving model-tier restrictions and `submit_pattern` precondition enforcement.
+- Test proving submitted Patterns reserve Discover windows through `access`.
 
 Final response:
 - List files changed.

@@ -31,6 +31,8 @@ Foundation exists: `rawstore`, `audit`, `access`, `pipeline`, `ingest`, `represe
 > Fixed tools: `inspect_spec`, `compute`, `propose_spec`, `test_assertion`, `submit_pattern`; all route through `access`. Decide: loop control, prompt scaffold, operator-input denylist, cost enforcement, no-Pattern handling.
 >
 > Constraints: hard per-cycle cap; rationale logged but withheld from Council; operator inputs only as tool/red-team requests with `shape_classification`; cheaper model for tool-call iteration, frontier model only at submission.
+>
+> Design artifact: [02-discovery-loop-3b-design.md](02-discovery-loop-3b-design.md).
 
 ### Coding prompt (after design)
 
