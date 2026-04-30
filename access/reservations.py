@@ -9,13 +9,13 @@ from pathlib import Path
 
 
 class WindowReservationError(PermissionError):
-    """Raised when a stage requests a rule window that is unavailable."""
+    """Raised when a stage requests a pattern window that is unavailable."""
 
 
 @dataclass(frozen=True)
 class WindowReservation:
     reservation_id: str
-    rule_id: str
+    pattern_id: str
     stage: str
     t0: str
     t1: str
@@ -24,7 +24,7 @@ class WindowReservation:
     def as_dict(self) -> dict[str, str]:
         return {
             "reservation_id": self.reservation_id,
-            "rule_id": self.rule_id,
+            "pattern_id": self.pattern_id,
             "stage": self.stage,
             "t0": self.t0,
             "t1": self.t1,
@@ -35,22 +35,22 @@ class WindowReservation:
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS window_reservations (
     reservation_id TEXT PRIMARY KEY,
-    rule_id TEXT NOT NULL,
+    pattern_id TEXT NOT NULL,
     stage TEXT NOT NULL,
     t0_utc TEXT NOT NULL,
     t1_utc TEXT NOT NULL,
     cycle_id TEXT NOT NULL,
     created_utc TEXT NOT NULL,
-    UNIQUE(rule_id, stage, t0_utc, t1_utc)
+    UNIQUE(pattern_id, stage, t0_utc, t1_utc)
 );
 
-CREATE INDEX IF NOT EXISTS idx_window_reservations_rule_stage
-    ON window_reservations(rule_id, stage, t0_utc, t1_utc);
+CREATE INDEX IF NOT EXISTS idx_window_reservations_pattern_stage
+    ON window_reservations(pattern_id, stage, t0_utc, t1_utc);
 """
 
 
 class WindowReservationBook:
-    """Persistent rule-window reservation ledger used by the access layer."""
+    """Persistent pattern-window reservation ledger used by the access layer."""
 
     def __init__(self, root: Path | str) -> None:
         self._root = Path(root)
@@ -78,19 +78,19 @@ class WindowReservationBook:
     def reserve(
         self,
         *,
-        rule_id: str,
+        pattern_id: str,
         stage: str,
         t0: datetime,
         t1: datetime,
         cycle_id: str,
     ) -> tuple[WindowReservation, bool]:
-        rule_id = _rule_id(rule_id)
+        pattern_id = _pattern_id(pattern_id)
         stage = _stage(stage)
         cycle_id = _cycle_id(cycle_id)
         t0_iso, t1_iso = _window_iso(t0, t1)
         with self._lock:
             existing = self._lookup_exact(
-                rule_id=rule_id,
+                pattern_id=pattern_id,
                 stage=stage,
                 t0_iso=t0_iso,
                 t1_iso=t1_iso,
@@ -100,7 +100,7 @@ class WindowReservationBook:
 
             reservation = WindowReservation(
                 reservation_id=str(uuid.uuid4()),
-                rule_id=rule_id,
+                pattern_id=pattern_id,
                 stage=stage,
                 t0=t0_iso,
                 t1=t1_iso,
@@ -108,11 +108,11 @@ class WindowReservationBook:
             )
             self._conn.execute(
                 "INSERT INTO window_reservations("
-                "reservation_id, rule_id, stage, t0_utc, t1_utc, cycle_id, created_utc"
+                "reservation_id, pattern_id, stage, t0_utc, t1_utc, cycle_id, created_utc"
                 ") VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (
                     reservation.reservation_id,
-                    reservation.rule_id,
+                    reservation.pattern_id,
                     reservation.stage,
                     reservation.t0,
                     reservation.t1,
@@ -125,17 +125,17 @@ class WindowReservationBook:
     def exact(
         self,
         *,
-        rule_id: str,
+        pattern_id: str,
         stage: str,
         t0: datetime,
         t1: datetime,
     ) -> WindowReservation | None:
-        rule_id = _rule_id(rule_id)
+        pattern_id = _pattern_id(pattern_id)
         stage = _stage(stage)
         t0_iso, t1_iso = _window_iso(t0, t1)
         with self._lock:
             return self._lookup_exact(
-                rule_id=rule_id,
+                pattern_id=pattern_id,
                 stage=stage,
                 t0_iso=t0_iso,
                 t1_iso=t1_iso,
@@ -144,46 +144,46 @@ class WindowReservationBook:
     def overlapping(
         self,
         *,
-        rule_id: str,
+        pattern_id: str,
         t0: datetime,
         t1: datetime,
         stage: str | None = None,
     ) -> list[WindowReservation]:
-        rule_id = _rule_id(rule_id)
+        pattern_id = _pattern_id(pattern_id)
         stage = None if stage is None else _stage(stage)
         t0_iso, t1_iso = _window_iso(t0, t1)
         with self._lock:
             if stage is None:
                 rows = self._conn.execute(
-                    "SELECT reservation_id, rule_id, stage, t0_utc, t1_utc, cycle_id "
+                    "SELECT reservation_id, pattern_id, stage, t0_utc, t1_utc, cycle_id "
                     "FROM window_reservations "
-                    "WHERE rule_id = ? AND t0_utc <= ? AND t1_utc >= ? "
+                    "WHERE pattern_id = ? AND t0_utc <= ? AND t1_utc >= ? "
                     "ORDER BY t0_utc, t1_utc, stage",
-                    (rule_id, t1_iso, t0_iso),
+                    (pattern_id, t1_iso, t0_iso),
                 ).fetchall()
             else:
                 rows = self._conn.execute(
-                    "SELECT reservation_id, rule_id, stage, t0_utc, t1_utc, cycle_id "
+                    "SELECT reservation_id, pattern_id, stage, t0_utc, t1_utc, cycle_id "
                     "FROM window_reservations "
-                    "WHERE rule_id = ? AND stage = ? AND t0_utc <= ? AND t1_utc >= ? "
+                    "WHERE pattern_id = ? AND stage = ? AND t0_utc <= ? AND t1_utc >= ? "
                     "ORDER BY t0_utc, t1_utc",
-                    (rule_id, stage, t1_iso, t0_iso),
+                    (pattern_id, stage, t1_iso, t0_iso),
                 ).fetchall()
         return [_reservation_from_row(row) for row in rows]
 
     def _lookup_exact(
         self,
         *,
-        rule_id: str,
+        pattern_id: str,
         stage: str,
         t0_iso: str,
         t1_iso: str,
     ) -> WindowReservation | None:
         row = self._conn.execute(
-            "SELECT reservation_id, rule_id, stage, t0_utc, t1_utc, cycle_id "
+            "SELECT reservation_id, pattern_id, stage, t0_utc, t1_utc, cycle_id "
             "FROM window_reservations "
-            "WHERE rule_id = ? AND stage = ? AND t0_utc = ? AND t1_utc = ?",
-            (rule_id, stage, t0_iso, t1_iso),
+            "WHERE pattern_id = ? AND stage = ? AND t0_utc = ? AND t1_utc = ?",
+            (pattern_id, stage, t0_iso, t1_iso),
         ).fetchone()
         return None if row is None else _reservation_from_row(row)
 
@@ -191,7 +191,7 @@ class WindowReservationBook:
 def _reservation_from_row(row: tuple[str, str, str, str, str, str]) -> WindowReservation:
     return WindowReservation(
         reservation_id=row[0],
-        rule_id=row[1],
+        pattern_id=row[1],
         stage=row[2],
         t0=row[3],
         t1=row[4],
@@ -215,15 +215,15 @@ def _ensure_utc(ts: datetime, field: str) -> datetime:
     return ts.astimezone(timezone.utc)
 
 
-def _rule_id(value: str) -> str:
+def _pattern_id(value: str) -> str:
     if not isinstance(value, str) or len(value) != 64:
-        raise ValueError("rule_id must be a 64-character string")
+        raise ValueError("pattern_id must be a 64-character string")
     return value
 
 
 def _stage(value: str) -> str:
-    if value not in {"Screen", "Validate"}:
-        raise ValueError("reservation stage must be Screen or Validate")
+    if value not in {"Discover", "EmpiricalTest"}:
+        raise ValueError("reservation stage must be Discover or EmpiricalTest")
     return value
 
 

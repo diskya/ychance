@@ -61,7 +61,7 @@ class FingerprintQuantile:
         object.__setattr__(
             self,
             "values",
-            tuple(_finite_float(item, "quantile entry") for item in self.values),
+            tuple(_finite_float(item, "quantile value") for item in self.values),
         )
 
     def as_dict(self) -> dict[str, Any]:

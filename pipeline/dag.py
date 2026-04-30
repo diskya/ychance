@@ -12,7 +12,7 @@ a prior stage's output. The DAG:
   call to :meth:`run`, regardless of per-stage cache hits or failure;
 - delegates per-stage caching to :meth:`Stage.run`, so a re-run whose
   inputs haven't changed produces zero new records apart from the
-  DAG-level markers — this is the 1.4 exit criterion.
+  DAG-level markers — this is the 1.4 completion criterion.
 """
 
 from __future__ import annotations

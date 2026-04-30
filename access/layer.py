@@ -1,6 +1,6 @@
 """Access layer — the sole public read path into the raw store.
 
-Implements methodology §6.2 "Representation for Propose". Every read of the
+Implements methodology §6.2 "Representation for Discover". Every read of the
 raw store passes through ``AccessLayer``, which:
 
 1. Refuses to serve entries whose earliest known ``vendor_timestamp`` is
@@ -131,9 +131,9 @@ class AccessLayer:
             """Return provenance triples whose ``vendor_timestamp ≤ query_time``.
 
             Triples from the future are filtered out; an unknown hash or an
-            entry with no admissible provenance both yield an empty list. An
+            hash with no admissible provenance both yield an empty list. An
             empty return is therefore indistinguishable between "not known" and
-            "not yet visible" — Propose cannot peek by polling.
+            "not yet visible" — Discover cannot peek by polling.
             """
             qt = _ensure_utc(query_time)
             self._enforce_budget(hash=hash, qt=qt, kind="provenance")
@@ -238,20 +238,21 @@ class AccessLayer:
     def reserve_window(
         self,
         *,
-        rule_id: str,
+        pattern_id: str,
         stage: str,
         t0: datetime,
         t1: datetime,
     ) -> WindowReservation:
-        """Reserve a rule/window for a stage.
+        """Reserve a pattern/window for a stage.
 
-        Screen calls this before evaluating its held-out window. The booking
-        is idempotent for the same ``(rule_id, stage, t0, t1)`` tuple.
+        Discover records observation or tool-touched windows. EmpiricalTest
+        records replication windows after disjointness checks. The booking is
+        idempotent for the same ``(pattern_id, stage, t0, t1)`` tuple.
         """
         if self.__reservation_book is None:
             raise RuntimeError("AccessLayer has no WindowReservationBook")
         reservation, created = self.__reservation_book.reserve(
-            rule_id=rule_id,
+            pattern_id=pattern_id,
             stage=stage,
             t0=t0,
             t1=t1,
@@ -269,7 +270,7 @@ class AccessLayer:
     def ensure_window_reserved(
         self,
         *,
-        rule_id: str,
+        pattern_id: str,
         stage: str,
         t0: datetime,
         t1: datetime,
@@ -278,33 +279,33 @@ class AccessLayer:
         if self.__reservation_book is None:
             raise RuntimeError("AccessLayer has no WindowReservationBook")
         existing = self.__reservation_book.exact(
-            rule_id=rule_id,
+            pattern_id=pattern_id,
             stage=stage,
             t0=t0,
             t1=t1,
         )
         if existing is not None:
             return existing
-        return self.reserve_window(rule_id=rule_id, stage=stage, t0=t0, t1=t1)
+        return self.reserve_window(pattern_id=pattern_id, stage=stage, t0=t0, t1=t1)
 
     def assert_window_available(
         self,
         *,
-        rule_id: str,
+        pattern_id: str,
         stage: str,
         t0: datetime,
         t1: datetime,
     ) -> None:
-        """Refuse Validate windows that overlap Screen reservations."""
+        """Refuse EmpiricalTest windows that overlap Discover reservations."""
         if self.__reservation_book is None:
             raise RuntimeError("AccessLayer has no WindowReservationBook")
-        if not isinstance(rule_id, str) or len(rule_id) != 64:
-            raise ValueError("rule_id must be a 64-character string")
-        if stage not in {"Screen", "Validate"}:
-            raise ValueError("reservation stage must be Screen or Validate")
-        if stage != "Validate":
+        if not isinstance(pattern_id, str) or len(pattern_id) != 64:
+            raise ValueError("pattern_id must be a 64-character string")
+        if stage not in {"Discover", "EmpiricalTest"}:
+            raise ValueError("reservation stage must be Discover or EmpiricalTest")
+        if stage != "EmpiricalTest":
             self._log_window_check(
-                rule_id=rule_id,
+                pattern_id=pattern_id,
                 stage=stage,
                 t0=t0,
                 t1=t1,
@@ -313,14 +314,14 @@ class AccessLayer:
             )
             return
         overlaps = self.__reservation_book.overlapping(
-            rule_id=rule_id,
+            pattern_id=pattern_id,
             t0=t0,
             t1=t1,
-            stage="Screen",
+            stage="Discover",
         )
         outcome = "refused" if overlaps else "available"
         self._log_window_check(
-            rule_id=rule_id,
+            pattern_id=pattern_id,
             stage=stage,
             t0=t0,
             t1=t1,
@@ -329,7 +330,7 @@ class AccessLayer:
         )
         if overlaps:
             raise WindowReservationError(
-                f"Validate window overlaps Screen reservation for rule {rule_id}"
+                f"EmpiricalTest window overlaps Discover reservation for pattern {pattern_id}"
             )
 
     # --- internals -------------------------------------------------------
@@ -380,7 +381,7 @@ class AccessLayer:
                 "stage": "access",
                 "envelope": {
                     "cycle_id": self._cycle_id,
-                    "rule_id": reservation.rule_id,
+                    "pattern_id": reservation.pattern_id,
                 },
                 "kind": "window_reservation",
                 "action": action,
@@ -394,7 +395,7 @@ class AccessLayer:
     def _log_window_check(
         self,
         *,
-        rule_id: str,
+        pattern_id: str,
         stage: str,
         t0: datetime,
         t1: datetime,
@@ -407,7 +408,7 @@ class AccessLayer:
             {
                 "category": "Access",
                 "stage": "access",
-                "envelope": {"cycle_id": self._cycle_id, "rule_id": rule_id},
+                "envelope": {"cycle_id": self._cycle_id, "pattern_id": pattern_id},
                 "kind": "window_reservation_check",
                 "requested_stage": stage,
                 "requested_window": {

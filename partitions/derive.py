@@ -203,8 +203,8 @@ def _initial_centers(matrix: np.ndarray, k: int) -> np.ndarray:
     order = _lexsort_rows(matrix)
     if k == 1:
         return matrix[[order[0]]]
-    positions = np.linspace(0, len(order) - 1, num=k)
-    indices = [order[int(round(position))] for position in positions]
+    center_offsets = np.linspace(0, len(order) - 1, num=k)
+    indices = [order[int(round(offset))] for offset in center_offsets]
     return matrix[indices].copy()
 
 

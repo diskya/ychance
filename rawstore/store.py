@@ -142,7 +142,7 @@ class RawStore:
         """Append bytes (idempotent on repeat hash) and record provenance.
 
         Returns the sha256 hex digest of ``data``. If ``corrects`` is supplied
-        (a prior sha256 hex digest), records that this new entry corrects that
+        (a prior sha256 hex digest), records that these new bytes correct that
         original; the original is not mutated.
         """
         data = _coerce_data(data)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -18,11 +19,25 @@ from partitions import (
 )
 from pipeline import ArtifactStore
 from rawstore import RawStore
-from tests.rule.fixtures.helpers import SeriesRegistry, tick
 
 
 SPEC_5 = "5" * 64
 SPEC_6 = "6" * 64
+BASE_TIME = datetime(2024, 1, 1, tzinfo=timezone.utc)
+
+
+def tick(offset: int) -> datetime:
+    return BASE_TIME + timedelta(minutes=offset)
+
+
+class SeriesRegistry:
+    def __init__(self, series_by_ref: dict[str, list[float]]) -> None:
+        self._series_by_ref = {ref: tuple(values) for ref, values in series_by_ref.items()}
+
+    def resolve(self, spec_ref: str, t: datetime, access: AccessLayer) -> float:
+        del access
+        index = int((t.astimezone(timezone.utc) - BASE_TIME).total_seconds() // 60)
+        return float(self._series_by_ref[spec_ref][index])
 
 
 @pytest.fixture

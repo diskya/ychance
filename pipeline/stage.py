@@ -15,7 +15,7 @@ A Stage is a typed, versioned node with:
    form a fingerprint.
 2. On fingerprint hit (prior run's artifact still present): returns the
    cached output **with no side effects** — no artifact write, no audit
-   record. This is load-bearing for the 1.4 exit criterion
+   record. This is load-bearing for the 1.4 completion criterion
    ("re-running an unchanged DAG produces zero new audit records
    except re-run-start/end markers"). Only the DAG emits the markers.
 3. On miss: runs ``compute`` under a :class:`StageContext` that enforces
@@ -49,16 +49,13 @@ _ARCHITECTURE_STAGES = frozenset(
     {
         "Ingest",
         "Represent",
-        "Propose",
-        "Screen",
-        "Validate",
+        "Discover",
+        "Originality",
+        "EmpiricalTest",
         "Council",
-        "Paper-deploy",
-        "Observe",
-        "Graduate",
-        "Execute",
-        "Retire",
+        "Archive",
         "Audit",
+        "Operator",
         "Review",
     }
 )
@@ -286,7 +283,7 @@ class Stage:
         """Return category-specific fields to merge into the audit payload."""
         return {}
 
-    # --- main entry point -------------------------------------------------
+    # --- main call path ---------------------------------------------------
 
     def fingerprint(self, inputs: Any) -> tuple[str, str]:
         """Return ``(inputs_hash, fingerprint)``. Pure function of inputs.
@@ -323,7 +320,7 @@ class Stage:
             except KeyError:
                 pass
             else:
-                # Cache hit: no audit record. The 1.4 exit criterion requires
+                # Cache hit: no audit record. The 1.4 completion criterion requires
                 # that a re-run with unchanged inputs produces zero new audit
                 # records except the DAG-level start/end markers.
                 return StageResult(outputs, cached, True, CostUsage())

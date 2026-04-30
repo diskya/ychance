@@ -22,7 +22,7 @@ from typing import Any, Iterable, Optional
 GENESIS_HASH = "0" * 64
 
 # Allowed keys inside the ``envelope`` subset per §6.9 "Record categories".
-_ENVELOPE_KEYS = frozenset({"rule_id", "cycle_id", "m2a_id"})
+_ENVELOPE_KEYS = frozenset({"pattern_id", "cycle_id", "m2a_id"})
 
 # Day-file naming: <YYYY-MM-DD>.jsonl
 _DAY_FILE_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})\.jsonl$")
@@ -106,7 +106,7 @@ class AuditLog:
         """Append ``record`` to the current day's file, return its record_hash.
 
         Caller supplies: ``category``, ``stage``, ``envelope`` (subset of
-        rule_id/cycle_id/m2a_id), plus category-specific payload keys.
+        pattern_id/cycle_id/m2a_id), plus category-specific payload keys.
         Optional: ``timestamp`` (datetime or ISO string; defaults to now UTC),
         ``record_id`` (string; defaults to a fresh UUID4).
         ``record_hash`` and ``prev_hash`` are computed — supplying them is an

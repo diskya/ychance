@@ -1,119 +1,35 @@
 # Phase 0 operator decisions. Frozen for pre-clock build and first clock run.
-# Revisable at M2a only. Hypothesis, not permanent commitment.
-#
-# Operator is a non-US citizen operating outside the US — NRA (non-resident
-# alien) for US tax purposes, accessing US markets via IBKR. Home jurisdiction
-# (country of tax residence) is STILL TBD — several parametric fields below
-# depend on it and are marked accordingly. Confirm before freezing.
+# Revisable at M2a only. Research budget only; no trading capital.
 
 envelope:
   total_usd: 50000
 
 clock:
-  T_months: 18                             # methodology default; midpoint of 12–24 band
-  ops_budget_usd: 15000                    # $B — methodology default
+  T_months: 18
+  budget_usd: 15000
+  N_min: 5
+  K_replicate_months: 3
   relax_allowance: 1
-  K_cutover_months: 1                      # methodology default — friction-calibration window
-  K_live_real_months: 3                    # methodology default — real-money per-rule survival gate
 
-cutover:
-  ops_budget_usd: 3000                     # $B_cut — methodology default
-
-real_capital:
-  target_E_cap_usd: 25000                  # trimmed from the $27K example to leave invariant slack
-  target_E_res_usd: 5000                   # reserve, tax accrual, drawdown cushion
-
-sim_notional:
-  E_cap_usd: 25000                         # matches target_E_cap_usd for post-cutover sizing continuity
-  E_res_usd: 5000
-
-routing:
-  default_live_fraction: 0.0               # sim clock — no real routing. Ramped per-rule in Phase 11.
-  shadow_sim_enabled: true
-
-operator:
-  jurisdiction:
-    us_tax_status: NRA                     # non-resident alien for US tax (non-US citizen, non-US resident)
-    home_country: HK                       # Hong Kong — declared tax residency for this setup
-    physical_location_note: "Operator reports physical presence in Singapore; legal/operational base in HK via family. Compliance posture (CRS, residency certificate) should follow actual residency — resolve with a local tax advisor before cutover. Both HK and SG are territorial/0% CGT, so the profit math is near-identical; the delta is paperwork, not tax drag."
-    us_market_access: via_IBKR_Hong_Kong
-    forms_on_file:
-      - W-8BEN                             # required at IBKR for NRA status; 3-year validity
-  tax_bracket:
-    # Parametric hypothesis — revisable at M2a. Do not hardcode these into code.
-    # HK operates a territorial tax system: no tax on offshore-sourced income, no capital gains tax,
-    # no dividend tax at the personal level. Trading US equities as an HK-resident NRA:
-    #   - US capital gains: 0% (IRC §871)
-    #   - US state tax: 0% (no nexus)
-    #   - US dividend withholding: 30% (no US-HK tax treaty — unlike US-Singapore, US-China, etc.)
-    #   - HK capital gains tax: 0%
-    #   - HK dividend tax: 0%
-    # Net: capital-gains P&L survives ~100%. Dividend P&L is hit by the 30% US withhold and that
-    # is the final stop (HK imposes no further tax and grants no credit since no HK tax applies).
-    us_capital_gains_rate: 0.0
-    us_state_tax_rate: 0.0
-    us_dividend_withholding_default: 0.30
-    us_dividend_withholding_treaty: 0.30   # no US-HK treaty exists; default rate is the effective rate
-    home_country_capital_gains_rate: 0.0   # HK has no CGT
-    home_country_dividend_tax_rate: 0.0    # HK does not tax personal dividends
-    short_term_treatment: not_applicable   # HK draws no ST/LT distinction; irrelevant at 0% anyway
-    effective_drag_on_capital_gains: 0.0
-    effective_drag_on_dividends: 0.30
-
-target_broker:
-  choice: IBKR                             # Interactive Brokers — broadest retail access to shorts,
-                                           # options, futures, fractional, low commissions. Best fit
-                                           # for a friction model that must survive all A-instrument
-                                           # types the methodology permits. NRA-friendly: IBKR
-                                           # routes non-US residents to the appropriate entity
-                                           # (IBKR LLC, IBKR Ireland, IBKR Central Europe, IBKR
-                                           # Singapore, IBKR Hong Kong) per home_country.
-  account_entity: IBKR Hong Kong Limited   # SFC-licensed; the IBKR entity servicing HK residents
-                                           # (min deposit USD 10K — cleared by target_E_cap_usd = $25K)
-  w8ben_on_file: required                  # for NRA treaty-rate dividend withholding
-  capabilities:
-    long: true
-    short: true
-    options: true
-    futures: true
-    margin: true
-    fractional_shares: true
-  commissions:
-    # Parametric — IBKR Pro tiered US equities, approximate. Refine against actual fee schedule
-    # before freeze.
-    equities_per_share_usd: 0.005
-    equities_min_per_order_usd: 1.00
-    equities_max_bps_of_trade: 1.0
-    options_per_contract_usd: 0.65
-  borrow_rates:
-    # Parametric hypothesis. IBKR publishes per-symbol borrow; these are placeholders for the
-    # friction model's generic-short assumption until symbol-level rates are wired in.
-    easy_to_borrow_annual: 0.0025
-    general_collateral_annual: 0.0050
-    hard_to_borrow_annual_floor: 0.10
-  shortlist_alternates:
-    - Alpaca                               # API-native, narrower short availability; fallback only
-
-market_data:
-  vendor: Polygon.io                       # retail-accessible, affordable, reasonable coverage;
-                                           # lets IBKR integration be deferred to Phase 11 without
-                                           # blocking the sim clock on IBKR's data entitlements
-  bar_size: 1min                           # sufficient for intraday rules; daily aggregation is cheap
-  quote_type: bars_only                    # NBBO quotes upgrade is a post-M2a decision, not needed
-                                           # for first clock if friction model is bar-based
-  shortlist_alternates:
-    - Alpaca Data
-    - IBKR historical+live (post Phase 11)
+data_scope:
+  primary_domain: SEC EDGAR submissions
+  initial_sources:
+    - SEC EDGAR submissions
+  shortlist_extensions:
+    - FRED macro series
+    - retail-accessible reference data
 
 llm_families:
-  # ≥2 distinct training pipelines active at any time per Council rules.
+  # >=2 distinct training pipelines active at any time per Council requirement.
   # Shortlist of 3 so one can be rotated without dropping below 2.
-  - Anthropic                              # Claude family
-  - OpenAI                                 # GPT family
-  - Google                                 # Gemini family
+  - Anthropic
+  - OpenAI
+  - Google
 
-data_vendors:
-  # Non-price feeds. Start free/cheap; escalate only when a specific AI-proposal requires it.
-  - SEC EDGAR                              # filings — free
-  - FRED                                   # macro series — free (St. Louis Fed)
-  - Polygon.io reference data              # ticker/corporate-actions metadata, bundled with quotes
+stack:
+  language: python
+  version: "3.12"
+  storage:
+    raw_store_path: data/rawstore
+    audit_log_path: data/audit
+    backup: off-site backup TBD

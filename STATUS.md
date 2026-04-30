@@ -33,6 +33,18 @@ The phase-2 deletions cascade from `rule/`. Refitting them piecewise would have 
 - `methodology/04-empirical-test.md` — new file; replaces v2.1 Validation with assertion-replication on held-out windows.
 - `plan/README.md`, `00-operator-decisions.md`, `01-foundation.md`, `02-discovery-loop.md`, `03-council.md`, `06-operator-ux.md` — rewritten.
 
+### Foundation vocabulary scrub (2026-04-28)
+
+After the deletion pass, the surviving foundation was scrubbed for stale
+v2.1 names:
+- `tests/partitions/test_partitions.py` no longer imports deleted `tests.rule`
+  fixtures.
+- `access/` window reservations now use `pattern_id` and
+  `Discover`/`EmpiricalTest` stages, not `rule_id` and `Screen`/`Validate`.
+- `audit/` envelopes now admit `pattern_id`, `cycle_id`, and `m2a_id`.
+- `pipeline/` stage allowlist now reflects v3.0 stages.
+- `config/envelope.yaml` is trimmed to research-budget scope only.
+
 ## Current code state
 
 ### Surviving modules (foundation, no trading-shaped vocabulary)
@@ -65,7 +77,7 @@ The phase-2 deletions cascade from `rule/`. Refitting them piecewise would have 
 
 ## Phases under v3.0 plan
 
-- [x] **Phase 0** — operator decisions. `config/envelope.yaml` exists from v2.1 and still has trading-capital fields; flagged below for re-trim before next config change.
+- [x] **Phase 0** — operator decisions. `config/envelope.yaml` is trimmed to the v3.0 research-budget schema; no deployment fields remain.
 - [x] **Phase 1.1–1.4** — `rawstore/`, `audit/`, `access/`, `pipeline/` (Stage + DAG). All survive.
 - [x] **Phase 2.1–2.3** — Ingest (EDGAR), `represent/`, LLM-as-feature. All survive. Phase 2.3 §0a clarification: prompts in LLM-as-feature specs must be *extraction* prompts, not *suggestion* prompts.
 - [x] **Phase 4.2 (partitions module)** — `partitions/` survives.
@@ -96,7 +108,6 @@ The phase-2 deletions cascade from `rule/`. Refitting them piecewise would have 
 
 ## Known issues / flags
 
-- **`config/envelope.yaml` needs re-trimming.** Still has v2.1 trading-capital, cutover, broker, tax-bracket, and routing fields. Trim to v3.0 schema (envelope, clock, data_scope, llm_families, stack) before next config change. Audit references the file's hash, so re-trimming is a clock-relevant decision.
 - **Qwen pricing placeholders in `represent/pricing.py`**: still need operator confirmation against current Alibaba Cloud pricing.
 - **`SpecRegistry.register()` looseness** (accepts both finalized spec and raw body): still valid; revisit when Phase 3b Discover starts emitting specs.
 - **Codex-worker contributions are not yet recorded in `audit/`**: deferred to a later audit-extension phase.
@@ -111,4 +122,4 @@ The phase-2 deletions cascade from `rule/`. Refitting them piecewise would have 
 
 The next planned work is Phase 3a (Pattern object, clean build) and Phase 3b (Discover stage as tool-using agent). Phase 3a is the prerequisite; Phase 3b is the single largest piece of remaining work and needs a research thread before coding begins.
 
-`uv run pytest -q` should pass cleanly on the surviving foundation. If it does not, that's an environment issue (cached imports, lockfile drift), not a code issue — every dangling import was removed in the phase-2 cleanup.
+`uv run pytest -q` should pass cleanly on the surviving foundation before Phase 3a begins.

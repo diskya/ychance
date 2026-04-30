@@ -376,7 +376,7 @@ def test_invariant_violation_halts_and_does_not_cache(
     with pytest.raises(AssertionError):
         stage.run(IntInput(value=1))
     assert len(_audit_records(audit)) == 0
-    # Next call re-runs (no cache entry).
+    # Next call re-runs (no cache record).
     with pytest.raises(AssertionError):
         stage.run(IntInput(value=1))
 
@@ -499,12 +499,12 @@ def test_dag_emits_run_start_and_run_end_markers(
     assert records[0]["stage_order"] == ["addone", "double"]
 
 
-# --- the phase-1.4 exit criterion ------------------------------------------
+# --- the phase-1.4 completion criterion ------------------------------------
 
 def test_rerun_unchanged_dag_emits_only_dag_markers(
     artifacts: ArtifactStore, audit: AuditLog
 ) -> None:
-    """The 1.4 exit criterion: re-running an unchanged DAG must produce
+    """The 1.4 completion criterion: re-running an unchanged DAG must produce
     zero new audit records other than the re-run's DAG-level start/end
     markers. Stage cache hits must NOT write any record — not even a
     "skipped" marker — or the ledger grows unboundedly on idempotent
@@ -604,11 +604,11 @@ def test_dag_merges_per_stage_envelope_delta(
     dag.add(
         AddOne(artifacts=artifacts, audit=audit),
         inputs=lambda init, results: IntInput(value=init["x"]),
-        envelope=lambda init, results: {"rule_id": "r-1"},
+        envelope=lambda init, results: {"pattern_id": "p-1"},
     )
     dag.run({"x": 5})
     stage_record = [r for r in _audit_records(audit) if r["category"] == "Represent"][0]
-    assert stage_record["envelope"] == {"cycle_id": "c1", "rule_id": "r-1"}
+    assert stage_record["envelope"] == {"cycle_id": "c1", "pattern_id": "p-1"}
 
 
 def test_dag_rejects_binding_without_code_object(
@@ -645,12 +645,12 @@ def test_dag_run_end_records_per_stage_envelope(
     artifacts: ArtifactStore, audit: AuditLog
 ) -> None:
     """Per-stage envelope deltas must surface in run_end so an auditor can
-    filter by rule_id without scanning every stage record."""
+    filter by pattern_id without scanning every stage record."""
     dag = PipelineDAG(audit=audit, envelope={"cycle_id": "c1"})
     dag.add(
         AddOne(artifacts=artifacts, audit=audit),
         inputs=lambda init, results: IntInput(value=init["x"]),
-        envelope=lambda init, results: {"rule_id": "r-1"},
+        envelope=lambda init, results: {"pattern_id": "p-1"},
     )
     dag.add(
         Double(artifacts=artifacts, audit=audit),
@@ -663,7 +663,7 @@ def test_dag_run_end_records_per_stage_envelope(
     ][0]
     stages = {s["name"]: s for s in end["stages"]}
     assert stages["addone"]["status"] == "success"
-    assert stages["addone"]["envelope"] == {"cycle_id": "c1", "rule_id": "r-1"}
+    assert stages["addone"]["envelope"] == {"cycle_id": "c1", "pattern_id": "p-1"}
     assert stages["double"]["status"] == "success"
     assert stages["double"]["envelope"] == {"cycle_id": "c1"}
 
@@ -682,7 +682,7 @@ def test_dag_run_end_marker_still_emitted_on_failure(
     dag.add(
         Fails(artifacts=artifacts, audit=audit),
         inputs=lambda init, results: IntInput(value=init["x"]),
-        envelope=lambda init, results: {"rule_id": "r-1"},
+        envelope=lambda init, results: {"pattern_id": "p-1"},
     )
     dag.add(
         Double(artifacts=artifacts, audit=audit),
@@ -698,7 +698,7 @@ def test_dag_run_end_marker_still_emitted_on_failure(
     assert end["error"]["failed_stage"] == "fails"
     stages = {s["name"]: s for s in end["stages"]}
     assert stages["fails"]["status"] == "error"
-    assert stages["fails"]["envelope"] == {"cycle_id": "c1", "rule_id": "r-1"}
+    assert stages["fails"]["envelope"] == {"cycle_id": "c1", "pattern_id": "p-1"}
     assert stages["fails"]["cache_hit"] is None
     assert stages["fails"]["output_hash"] is None
     assert stages["double"]["status"] == "not_started"

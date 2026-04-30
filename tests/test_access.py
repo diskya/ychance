@@ -14,6 +14,8 @@ from access import (
     RateLimitExceeded,
     RawStoreWriter,
     TemporalAdmissibilityError,
+    WindowReservationBook,
+    WindowReservationError,
 )
 from audit import AuditLog, canonicalize
 from rawstore import Provenance, RawStore
@@ -291,7 +293,7 @@ def test_get_admission_iff_query_geq_earliest(
     vendor_delta_hours: int,
     query_delta_hours: int,
 ) -> None:
-    """Property (phase-exit criterion): access.get admits iff
+    """Property (phase completion criterion): access.get admits iff
     query_time ≥ earliest vendor_timestamp."""
     root = tmp_path_factory.mktemp("access_prop")
     store = RawStore(root / "rs")
@@ -437,6 +439,55 @@ def test_failed_reads_do_not_advance_counter(tmp_path: Path):
             access.get("0" * 64, BASE_T)
         assert access.reads_used == 0
     finally:
+        store.close()
+
+
+# --- window reservations ---------------------------------------------------
+
+def test_window_reservations_use_pattern_id_and_block_replication_overlap(
+    tmp_path: Path,
+) -> None:
+    store = RawStore(tmp_path / "rs")
+    log = AuditLog(tmp_path / "audit")
+    reservations = WindowReservationBook(tmp_path / "reservations")
+    access = AccessLayer(
+        store,
+        log,
+        cycle_id="c1",
+        max_reads_per_cycle=10,
+        reservation_book=reservations,
+    )
+    pattern_id = "a" * 64
+    try:
+        reservation = access.reserve_window(
+            pattern_id=pattern_id,
+            stage="Discover",
+            t0=BASE_T,
+            t1=BASE_T + timedelta(hours=1),
+        )
+
+        assert reservation.pattern_id == pattern_id
+        assert reservation.as_dict()["pattern_id"] == pattern_id
+        with pytest.raises(WindowReservationError, match="EmpiricalTest window overlaps"):
+            access.assert_window_available(
+                pattern_id=pattern_id,
+                stage="EmpiricalTest",
+                t0=BASE_T + timedelta(minutes=30),
+                t1=BASE_T + timedelta(hours=2),
+            )
+        access.assert_window_available(
+            pattern_id=pattern_id,
+            stage="EmpiricalTest",
+            t0=BASE_T + timedelta(hours=2),
+            t1=BASE_T + timedelta(hours=3),
+        )
+
+        records = [r for r in _audit_records(log) if r["kind"].startswith("window_")]
+        assert records[0]["envelope"] == {"cycle_id": "c1", "pattern_id": pattern_id}
+        assert records[1]["outcome"] == "refused"
+        assert records[2]["outcome"] == "available"
+    finally:
+        reservations.close()
         store.close()
 
 

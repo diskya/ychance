@@ -27,7 +27,7 @@ Serial spine: [00](00-operator-decisions.md) → [02](02-discovery-loop.md) → 
 
 | Phase | Estimate |
 |---|---|
-| 0 | already complete (1 trim of `config/envelope.yaml` pending) |
+| 0 | complete |
 | 3 (Discover redesign) | 4–6 weeks — research thread on the agent loop concentrates the time |
 | 4 (Council rebuild) | 2–3 weeks |
 | 5 (UX) | 1–2 weeks |

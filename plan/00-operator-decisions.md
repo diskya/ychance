@@ -24,6 +24,7 @@ envelope:
 
 clock:
   T_months: <int>                # e.g., 12
+  budget_usd: <number>           # $B, subset of envelope.total_usd
   N_min: <int>                   # e.g., 5
   K_replicate_months: <int>      # e.g., 3
   relax_allowance: 1
